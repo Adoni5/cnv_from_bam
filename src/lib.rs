@@ -2,7 +2,9 @@
 //! A python module for quickly and efficiently calculating a dynamic CNV profile from contigs continaed in a  BAM file.
 
 use fnv::FnvHashMap;
+use indicatif::ParallelProgressIterator;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use rust_htslib::bam::{self, FetchDefinition, Read, Record};
 use std::{error::Error, path::PathBuf};
 
@@ -44,7 +46,7 @@ impl BamFile {
 
 /// Calculate median value
 fn median(numbers: &mut [u16]) -> Option<f32> {
-    numbers.sort_unstable();
+    numbers.par_sort();
     let mid = numbers.len() / 2;
     if numbers.len() % 2 == 0 {
         Some((numbers[mid - 1] as f32 + numbers[mid] as f32) / 2.0)
@@ -67,7 +69,8 @@ pub fn calculate_cnv(
     let median_value: usize = median(&mut all_values).unwrap().round() as usize;
 
     let new_map: FnvHashMap<String, Vec<u16>> = bins
-        .into_iter()
+        .into_par_iter()
+        .progress_count(23)
         .map(|(k, v)| {
             let sums = v
                 .chunks(bin_width)
@@ -139,13 +142,18 @@ fn iterate_bam_file(bam_file_path: PathBuf, threads: Option<usize>) -> PyResult<
     while let Some(result) = bam_reader.read(&mut record) {
         match result {
             Ok(_) => {
-                println!("Read sequence: {:?}", record.pos());
-                let target_name =
-                    std::str::from_utf8(header.tid2name(record.tid() as u32)).unwrap();
-                results.get_mut(target_name).unwrap()[record.pos() as usize / BIN_SIZE] += 1;
-                number_reads += 1;
+                if !record.is_unmapped() {
+                    let target_name =
+                        std::str::from_utf8(header.tid2name(record.tid() as u32)).unwrap();
+
+                    results.get_mut(target_name).unwrap()[record.pos() as usize / BIN_SIZE] += 1;
+                    number_reads += 1;
+                }
             }
             Err(_) => panic!("BAM parsing failed..."),
+        }
+        if number_reads % 100000 == 0 {
+            println!("Number of reads read: {}", number_reads);
         }
     }
     println!("Number of reads: {}", number_reads);

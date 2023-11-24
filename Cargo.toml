@@ -13,8 +13,8 @@ pyo3 = "0.20.0"
 rust-htslib = { version = "*", default-features = false }
 num_cpus = "1.13"
 fnv = "1.0.7"
-
-
+indicatif = {version = "*", features = ["rayon"]}
+rayon = {version = "1.8.0" }
 
 [features]
 extension-module = ["pyo3/extension-module"]
