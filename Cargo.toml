@@ -1,0 +1,26 @@
+[package]
+name = "cnv_from_bam"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "cnv_from_bam"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pyo3 = "0.20.0"
+rust-htslib = { version = "*", default-features = false }
+num_cpus = "1.13"
+fnv = "1.0.7"
+
+
+
+[features]
+extension-module = ["pyo3/extension-module"]
+default = ["extension-module"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units  = 1
