@@ -10,7 +10,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 pyo3 = "0.20.0"
-rust-htslib = { version = "*", default-features = false }
+rust-htslib = { version = "*", default-features = false, features = ["bindgen"]}
 num_cpus = "1.13"
 fnv = "1.0.7"
 indicatif = {version = "*", features = ["rayon"]}
