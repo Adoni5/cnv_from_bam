@@ -278,7 +278,7 @@ fn iterate_bam_file(
         match result {
             Ok(_) => {
                 if !record.is_unmapped()
-                    & (record.mapq() > mapq_filter)
+                    & (record.mapq() >= mapq_filter)
                     & !record.is_secondary()
                     & !record.is_supplementary()
                 {
@@ -286,8 +286,8 @@ fn iterate_bam_file(
                         std::str::from_utf8(header.tid2name(record.tid() as u32)).unwrap();
 
                     results.get_mut(target_name).unwrap()[record.pos() as usize / BIN_SIZE] += 1;
+                    valid_number_reads += 1;
                 }
-                valid_number_reads += 1;
             }
             Err(_) => panic!("BAM parsing failed..."),
         }
