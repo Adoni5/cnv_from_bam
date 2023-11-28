@@ -41,7 +41,7 @@ jobs:
           sccache: 'true'
           manylinux: auto
           container: ${{ matrix.container }}
-          before-script-linux: "sudo apt update && sudo dpkg --add-architecture i386 && sudo apt install -y libc6-dev-i386-cross"
+          before-script-linux: "sudo apt update && sudo dpkg --add-architecture i386 && sudo apt install -y libc6-dev-i386-x32-cross"
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:
