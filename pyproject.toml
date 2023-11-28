@@ -12,5 +12,22 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.urls]
+Documentation = "https://github.com/adoni5/ideogram#readme"
+Issues = "https://github.com/adoni5/ideogram/issues"
+Source = "https://github.com/adoni5/ideogram"
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pre-commit",
+  "pytest-benchmark[histogram]"
+]
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--doctest-modules"]
+doctest_optionflags = "ELLIPSIS"
+
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
