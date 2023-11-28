@@ -51,10 +51,12 @@
 
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
+use noodles::bam::indexed_reader::Builder;
+use noodles::sam::alignment::Record;
+use std::{error::Error, path::PathBuf};
+
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use rust_htslib::bam::{self, FetchDefinition, Read, Record};
-use std::{error::Error, path::PathBuf};
 
 /// Number of reads expected in given bin width on the genome
 const READS_PER_BIN: usize = 100;
@@ -274,32 +276,38 @@ fn iterate_bam_file(
     let mapq_filter = mapq_filter.unwrap_or(60);
     let bam_file = BamFile::new(bam_file_path);
     // Open bam file
-    let mut bam_reader = bam::IndexedReader::from_path(&bam_file.path).unwrap_or_else(|_| {
-        panic!(
-            "Error creating bam reader with file {}",
-            bam_file.path.display()
-        )
-    });
-    bam_reader
-        .set_threads(threads.unwrap_or(usize::from(std::thread::available_parallelism().unwrap())))
-        .expect("Error setting threads");
-    let header = bam_reader.header().to_owned();
-    let num_targets = header.target_count();
+    let mut bam_reader = Builder::default().build_from_path(bam_file.path)?;
+
+    let header = bam_reader.read_header().unwrap().to_owned();
+    let reference_sequences = header.reference_sequences();
+
+    // Calculate total genome length
+    let genome_length: usize = reference_sequences
+        .iter()
+        .map(|(_rs_name, rs)| usize::from(rs.length()))
+        .sum();
 
     // Get total number of reads, mapped and unmapped
-    let (genome_length, total_mapped, total_unmapped): (u64, u64, u64) =
-        bam_reader.index_stats().unwrap().into_iter().fold(
-            (0, 0, 0),
-            |(acc2, acc3, acc4), (_, second, third, fourth)| {
-                (acc2 + second, acc3 + third, acc4 + fourth)
+    let (total_mapped, total_unmapped): (u64, u64) = bam_reader
+        .index()
+        .reference_sequences()
+        .iter()
+        .map(|x| x.metadata().unwrap())
+        .fold(
+            (0, 0),
+            |(mapped_count_acc, unmapped_count_acc), metadata| {
+                (
+                    mapped_count_acc + metadata.mapped_record_count(),
+                    unmapped_count_acc + metadata.unmapped_record_count(),
+                )
             },
         );
 
     let mut results: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
     // Prepare all the CNV bins
-    for target in 0..num_targets {
-        let target_name = std::str::from_utf8(header.tid2name(target)).unwrap();
-        let target_length: usize = header.target_len(target).unwrap().try_into().unwrap();
+    for (target_name, target) in reference_sequences {
+        let target_name = target_name.as_str();
+        let target_length: usize = usize::from(target.length());
         results.insert(
             target_name.to_string(),
             vec![0; (target_length / BIN_SIZE) + 1],
@@ -310,7 +318,6 @@ fn iterate_bam_file(
     println!("Genome length: {}", genome_length);
     // number of reads in the bam file that match our criteria
     let mut valid_number_reads: usize = 0;
-    bam_reader.fetch(FetchDefinition::All).unwrap();
     // Setup progress bar
     let bar = ProgressBar::new(total_mapped + total_unmapped);
     bar.set_style(
@@ -321,23 +328,23 @@ fn iterate_bam_file(
         .progress_chars("##-"),
     );
     // Allocate record
-    let mut record = Record::new();
-    while let Some(result) = bam_reader.read(&mut record) {
-        match result {
-            Ok(_) => {
-                if !record.is_unmapped()
-                    & (record.mapq() >= mapq_filter)
-                    & !record.is_secondary()
-                    & !record.is_supplementary()
-                {
-                    let target_name =
-                        std::str::from_utf8(header.tid2name(record.tid() as u32)).unwrap();
-
-                    results.get_mut(target_name).unwrap()[record.pos() as usize / BIN_SIZE] += 1;
-                    valid_number_reads += 1;
-                }
-            }
-            Err(_) => panic!("BAM parsing failed..."),
+    let mut record = Record::default();
+    while bam_reader.read_record(&header, &mut record)? != 0 {
+        let flags = record.flags();
+        if !flags.is_unmapped()
+            & (record.mapping_quality().unwrap().get() >= mapq_filter)
+            & !flags.is_secondary()
+            & !flags.is_supplementary()
+        {
+            let target_name = record
+                .reference_sequence(&header)
+                .unwrap()
+                .unwrap()
+                .0
+                .as_str();
+            results.get_mut(target_name).unwrap()
+                [record.alignment_start().unwrap().get() / BIN_SIZE] += 1;
+            valid_number_reads += 1;
         }
         bar.inc(1);
     }
@@ -345,12 +352,11 @@ fn iterate_bam_file(
         "Number of reads matching criteria mapq >{} and aligned: {}",
         mapq_filter, valid_number_reads
     );
-    let (cnv_profile, bin_width) =
-        calculate_cnv(genome_length as usize, valid_number_reads, results);
+    let (cnv_profile, bin_width) = calculate_cnv(genome_length, valid_number_reads, results);
     let result = CnvResult {
         cnv: cnv_profile,
         bin_width,
-        genome_length: genome_length as usize,
+        genome_length,
     };
     Ok(result)
 }
