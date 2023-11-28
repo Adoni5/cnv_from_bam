@@ -67,7 +67,7 @@ ax.set_ylim((0,8))
 ax.set_xlim((0, total))
 ```
 Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
-![example cnv plot](example_cnv.png)
+![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)
 ## Documentation
 
 To generate the documentation, run:
