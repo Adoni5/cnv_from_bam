@@ -1,5 +1,53 @@
 #![deny(missing_docs, clippy::missing_docs_in_private_items)]
-//! A python module for quickly and efficiently calculating a dynamic CNV profile from contigs continaed in a  BAM file.
+//! # CNV From BAM
+//!
+//! `cnv_from_bam` is a Rust library designed to efficiently calculate dynamic Copy Number Variation (CNV)
+//! profiles from sequence alignments contained in BAM files. It is implemented as a Python module using PyO3,
+//! making it easy to integrate into Python-based genomic analysis workflows.
+//!
+//! The library processes genomic data represented in BAM format to identify and quantify variations in copy
+//! number across different regions of the genome. This functionality is especially relevant in fields like
+//! cancer research, where CNVs are a key area of study.
+//!
+//! ## Features
+//!
+//! - **Efficient Processing**: Leverages the performance capabilities of Rust for handling large BAM files.
+//! - **Python Integration**: Facilitates integration with Python, enabling use in Python-based genomic workflows.
+//! - **Multithreading**: Improves performance through multithreaded processing, particularly advantageous for large datasets.
+//! - **Dynamic Binning**: Adapts binning dynamically based on total read counts and genome length, suitable for a variety of genomic sizes and complexities.
+//! - **CNV Computation**: Computes CNV values for each bin in each contig, aiding in the analysis of genomic copy number variations.
+//!
+//! ## Usage
+//!
+//! The library provides several functions, including:
+//!
+//! - `iterate_bam_file`: Iterates over a BAM file to filter alignments and compute CNV profiles with dynamic bin sizing.
+//! - `calculate_cnv`: Calculates CNVs for each contig based on genome length, read counts, and read bins.
+//! - `median`: Utility function to determine the median of a `u16` slice, used in CNV calculations.
+//!
+//! ### Example
+//!
+//! Using `iterate_bam_file` to process a BAM file:
+//!
+//! ```rust
+//! use cnv_from_bam::iterate_bam_file;
+//! use std::path::PathBuf;
+//!
+//! let bam_path = PathBuf::from("path/to/bam/file.bam");
+//! let result = iterate_bam_file(bam_path, Some(4), Some(60));
+//! // Handle result...
+//! ```
+//!
+//! ## Installation
+//!
+//! Include this library as a dependency in your Rust project's `Cargo.toml` and build it to use in your Python scripts.
+//!
+//! ## Testing
+//!
+//! The module includes a suite of unit tests to ensure functionality reliability and correctness.
+//!
+//! ---
+//!
 
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
