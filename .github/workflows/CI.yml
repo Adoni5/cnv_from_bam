@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64
             container: ghcr.io/rust-cross/manylinux2014-cross:aarch64
         #   target: x86_64-unknown-linux-gnu
         #   container: musllinux_1_2
