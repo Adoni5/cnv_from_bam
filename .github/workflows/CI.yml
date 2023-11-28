@@ -32,7 +32,7 @@ jobs:
       - name: Install stuf
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-dev libclang-dev clang
+          sudo apt-get install -y llvm-dev libclang-dev clang cmake gcc-aarch64-linux-gnu
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
