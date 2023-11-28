@@ -239,8 +239,6 @@ pub struct CnvResult {
 /// # Arguments
 ///
 /// * `bam_file_path` - A `PathBuf` specifying the path to the BAM file.
-/// * `threads` - An `Option<usize>` specifying the number of threads to use for reading the BAM file.
-///              If `None`, the number of CPUs is used.
 /// * `mapq_filter` - An `Option<u8>` specifying the minimum mapping quality to consider.
 ///                   Alignments with a mapping quality below this value are ignored. Default is 60.
 ///
@@ -256,7 +254,7 @@ pub struct CnvResult {
 ///
 /// // Example usage of iterate_bam_file
 /// let bam_path = PathBuf::from("path/to/bam/file.bam");
-/// let result = iterate_bam_file(bam_path, Some(4), Some(60));
+/// let result = iterate_bam_file(bam_path, Some(60));
 /// match result {
 ///     Ok(cnv_result) => {
 ///         // Process the CNV results
@@ -270,7 +268,7 @@ pub struct CnvResult {
 #[pyfunction]
 fn iterate_bam_file(
     bam_file_path: PathBuf,
-    threads: Option<usize>,
+    _threads: Option<u8>,
     mapq_filter: Option<u8>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
