@@ -23,7 +23,11 @@ jobs:
     runs-on: ubuntu-20.04
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: aarch64-unknown-linux-gnu
+            container: ghcr.io/rust-cross/manylinux2014-cross:aarch64
+        #   target: x86_64-unknown-linux-gnu
+        #   container: musllinux_1_2
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -36,7 +40,7 @@ jobs:
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 pypy3.8 pypy3.9 pypy3.10
           sccache: 'true'
           manylinux: auto
-          before-script-linux: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang cmake gcc-aarch64-linux-gnu
+          container: ${{ matrix.container }}
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:
