@@ -21,9 +21,9 @@ license = "MIT"
 
 
 [project.urls]
-Documentation = "https://github.com/adoni5/ideogram#readme"
-Issues = "https://github.com/adoni5/ideogram/issues"
-Source = "https://github.com/adoni5/ideogram"
+Documentation = "https://github.com/adoni5/cnv_from_bam#readme"
+Issues = "https://github.com/adoni5/cnv_from_bam/issues"
+Source = "https://github.com/adoni5/cnv_from_bam"
 
 [project.optional-dependencies]
 dev = [
