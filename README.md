@@ -66,6 +66,8 @@ for contig, cnv in result.cnv.items():
 ax.set_ylim((0,8))
 ax.set_xlim((0, total))
 ```
+Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
+![example cnv plot](example_cnv.png)
 ## Documentation
 
 To generate the documentation, run:
