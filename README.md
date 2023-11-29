@@ -47,7 +47,8 @@ pub struct CnvResult {
 
 Where `result.cnv` is a hash map containing the Copy Number for each bin of `bin_width` bases for each contig in the reference genome, `result.bin_width` is the width of the bins in bases, and `result.genome_length` is the total length of the genome.
 
-> [!NOTE] **Note**: Only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored.
+> [!NOTE]
+> **Note**: Only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored.
 
 **Directory analysis**
 To analyse a directory of BAM files, use the `iterate_bam_dir` function:
@@ -63,8 +64,9 @@ let result = iterate_bam_file(bam_path, Some(4), Some(60));
 
 This again returns a CnvResult, but this time the CNV values are summed across all BAM files in the directory. The bin width and genome length are calculated based on the first BAM file in the directory.
 
-> [!NOTE] **Note**: All BAM files in the directory must be aligned to the same reference genome.
->
+> [!NOTE]
+> **Note**: All BAM files in the directory must be aligned to the same reference genome.
+
 ## Python Integration
 
 `cnv_from_bam` can be used in Python using the PyO3 bindings. To install the Python bindings, run:
