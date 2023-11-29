@@ -29,7 +29,7 @@
 //!
 //! Using `iterate_bam_file` to process a BAM file:
 //!
-//! ```rust
+//! ```rust,ignore
 //! use cnv_from_bam::iterate_bam_file;
 //! use std::path::PathBuf;
 //!
@@ -51,11 +51,12 @@
 
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::{error::Error, path::PathBuf};
 
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::{fs::File, io, num::NonZeroUsize, thread};
+use std::collections::HashSet;
+use std::{error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
 
 use noodles::{
     bam, csi,
@@ -236,6 +237,141 @@ pub struct CnvResult {
     pub genome_length: usize,
 }
 
+/// Iterates over a BAM file, filters reads based on the mapping quality (`mapq_filter`),
+/// and populates the provided frequency map with read counts for each genomic bin.
+///
+/// # Arguments
+///
+/// * `bam_file_path` - Path to the BAM file.
+/// * `mapq_filter` - Minimum mapping quality to consider for read filtering.
+/// * `genome_length` - A mutable reference to a usize to store the total length of the genome.
+/// * `valid_number_reads` - A mutable reference to a usize to store the count of valid reads.
+/// * `frequencies` - A mutable reference to a hash map to store read counts for each genomic bin.
+///
+/// # Returns
+///
+/// A result indicating successful execution or an error.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::path::PathBuf;
+/// use fnv::FnvHashMap;
+///
+/// let bam_file_path = PathBuf::from("path/to/sample.bam");
+/// let mapq_filter = 30;
+/// let mut genome_length = 0;
+/// let mut valid_number_reads = 0;
+/// let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+///
+/// let result = _iterate_bam_file(bam_file_path, mapq_filter, &mut genome_length, &mut valid_number_reads, &mut frequencies);
+/// assert!(result.is_ok());
+/// ```
+///
+fn _iterate_bam_file(
+    bam_file_path: PathBuf,
+    mapq_filter: u8,
+    genome_length: &mut usize,
+    valid_number_reads: &mut usize,
+    frequencies: &mut FnvHashMap<String, Vec<u16>>,
+    contigs: Option<&mut HashSet<String>>,
+) -> Result<(), PyErr> {
+    let bam_file = BamFile::new(bam_file_path);
+    // Open bam file
+
+    let file = File::open(&bam_file.path)?;
+
+    let worker_count = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    let decoder = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+
+    let mut bam_reader = bam::Reader::from(decoder);
+    let header = bam_reader.read_header()?;
+    let reference_sequences = header.reference_sequences();
+
+    if contigs.as_ref().is_some_and(|c| c.is_empty()) {
+        let contigs = contigs.unwrap();
+        for (name, reference_sequence) in reference_sequences {
+            contigs.insert(name.to_string());
+            let len = (usize::from(reference_sequence.length()) / BIN_SIZE) + 1;
+            let bins = vec![0; len];
+            frequencies.insert(name.to_string(), bins);
+        }
+        // Calculate total genome length
+        let _genome_length: usize = reference_sequences
+            .iter()
+            .map(|(_rs_name, rs)| usize::from(rs.length()))
+            .sum();
+        // Append total genome length
+        *genome_length += _genome_length;
+    } else if contigs.as_ref().is_some() {
+        let contigs = contigs.unwrap();
+        let contig_names = contigs.iter().cloned().collect::<HashSet<_>>();
+        if contig_names != *contigs {
+            return Err(PyRuntimeError::new_err(format!(
+                "Reference contigs for bam file {:?} do not match previous bam file",
+                bam_file.path
+            )));
+        }
+    }
+    let index = File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
+        .map(csi::Reader::new)
+        .unwrap()
+        .read_index()
+        .unwrap();
+
+    // Get total number of reads, mapped and unmapped
+    let (total_mapped, total_unmapped): (u64, u64) = index
+        .reference_sequences()
+        .iter()
+        .map(|x| x.metadata().unwrap())
+        .fold(
+            (0, 0),
+            |(mapped_count_acc, unmapped_count_acc), metadata| {
+                (
+                    mapped_count_acc + metadata.mapped_record_count(),
+                    unmapped_count_acc + metadata.unmapped_record_count(),
+                )
+            },
+        );
+
+    // number of reads in the bam file that match our criteria
+    let mut _valid_number_reads: usize = 0;
+    // Setup progress bar
+    let bar = ProgressBar::new(total_mapped + total_unmapped);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+        )
+        .unwrap()
+        .progress_chars("##-"),
+    );
+    // Allocate record
+    let mut record = bam::lazy::Record::default();
+
+    while bam_reader.read_lazy_record(&mut record)? != 0 {
+        if filter(&record, mapq_filter) {
+            let reference_sequence_name =
+                reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
+            let start = record.alignment_start()?.expect("missing alignment start");
+
+            let bins = frequencies
+                .get_mut(reference_sequence_name)
+                .expect("missing frequencies");
+            let bin = (usize::from(start) - 1) / BIN_SIZE;
+            bins[bin] += 1;
+            _valid_number_reads += 1;
+        }
+        bar.inc(1)
+    }
+    println!(
+        "Number of reads matching criteria mapq >{} and aligned: {} for bam file: {:?}",
+        mapq_filter, _valid_number_reads, bam_file.path
+    );
+    // Accumulate the valid numebr of reads
+    *valid_number_reads += _valid_number_reads;
+    Ok(())
+}
+
 /// Iterates over a BAM file to compute Copy Number Variation (CNV) profiles for each contig.
 ///
 /// This function reads through a BAM file, filters the alignments based on mapping quality,
@@ -277,98 +413,64 @@ fn iterate_bam_file(
     mapq_filter: Option<u8>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
-    let bam_file = BamFile::new(bam_file_path);
-    // Open bam file
-
-    let file = File::open(&bam_file.path)?;
-
-    let worker_count = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-    let decoder = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
-
-    let mut bam_reader = bam::Reader::from(decoder);
-    let header = bam_reader.read_header()?;
-
-    let reference_sequences = header.reference_sequences();
-    let index = File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
-        .map(csi::Reader::new)
-        .unwrap()
-        .read_index()
-        .unwrap();
-    // Calculate total genome length
-    let genome_length: usize = reference_sequences
-        .iter()
-        .map(|(_rs_name, rs)| usize::from(rs.length()))
-        .sum();
-
-    // Get total number of reads, mapped and unmapped
-    let (total_mapped, total_unmapped): (u64, u64) = index
-        .reference_sequences()
-        .iter()
-        .map(|x| x.metadata().unwrap())
-        .fold(
-            (0, 0),
-            |(mapped_count_acc, unmapped_count_acc), metadata| {
-                (
-                    mapped_count_acc + metadata.mapped_record_count(),
-                    unmapped_count_acc + metadata.unmapped_record_count(),
-                )
-            },
-        );
-
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
-    // Prepare all the CNV bins
-    for (name, reference_sequence) in header.reference_sequences() {
-        let len = (usize::from(reference_sequence.length()) / BIN_SIZE) + 1;
-        let bins = vec![0; len];
-        frequencies.insert(name.to_string(), bins);
-    }
+    let genome_length = &mut 0_usize;
+    let valid_number_reads = &mut 0_usize;
+    let contigs: &mut HashSet<String> = &mut HashSet::new();
+    if bam_file_path.is_dir() {
+        println!("Process directory: {:?}", &bam_file_path);
+        // Iterate over all files in the directory
+        for entry in fs::read_dir(&bam_file_path)? {
+            let entry = entry?;
+            let path = entry.path();
 
-    // number of reads in the bam file that match our criteria
-    let mut valid_number_reads: usize = 0;
-    // Setup progress bar
-    let bar = ProgressBar::new(total_mapped + total_unmapped);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-"),
-    );
-    // Allocate record
-    let mut record = bam::lazy::Record::default();
-
-    while bam_reader.read_lazy_record(&mut record)? != 0 {
-        if filter(&record) {
-            let reference_sequence_name =
-                reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
-            let start = record.alignment_start()?.expect("missing alignment start");
-
-            let bins = frequencies
-                .get_mut(reference_sequence_name)
-                .expect("missing frequencies");
-            let bin = (usize::from(start) - 1) / BIN_SIZE;
-            bins[bin] += 1;
-            valid_number_reads += 1;
+            // Check if the entry is a file and ends with .bam
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("bam") {
+                // Process the .bam file
+                println!("Processing BAM file: {:?}", path);
+                // Insert your BAM file processing logic here
+                _iterate_bam_file(
+                    path,
+                    mapq_filter,
+                    genome_length,
+                    valid_number_reads,
+                    &mut frequencies,
+                    Some(contigs),
+                )
+                .unwrap();
+            }
         }
-        bar.inc(1)
+    } else if bam_file_path.is_file()
+        && bam_file_path.extension().and_then(|s| s.to_str()).unwrap() == "bam"
+    {
+        // The path is a single .bam file
+        println!("Processing single BAM file: {:?}", &bam_file_path);
+        // Insert your BAM file processing logic here
+        _iterate_bam_file(
+            bam_file_path,
+            mapq_filter,
+            genome_length,
+            valid_number_reads,
+            &mut frequencies,
+            Some(contigs),
+        )?;
+    } else {
+        // The path is neither a directory nor a .bam file
+        println!("The path is neither a directory nor a .bam file.");
     }
-    println!(
-        "Number of reads matching criteria mapq >{} and aligned: {}",
-        mapq_filter, valid_number_reads
-    );
-    let (cnv_profile, bin_width) = calculate_cnv(genome_length, valid_number_reads, frequencies);
+
+    let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
     let result = CnvResult {
         cnv: cnv_profile,
         bin_width,
-        genome_length,
+        genome_length: *genome_length,
     };
     Ok(result)
 }
 
 /// Filters a BAM record based on mapping quality and flags.
-fn filter(record: &bam::lazy::Record) -> bool {
-    /// It's the minimum mapping quality we want to consider.
-    const MIN_MAPPING_QUALITY: MappingQuality = match MappingQuality::new(60) {
+fn filter(record: &bam::lazy::Record, mapping_quality: u8) -> bool {
+    let min_mapping_quality: MappingQuality = match MappingQuality::new(mapping_quality) {
         Some(mapq) => mapq,
         None => unreachable!(),
     };
@@ -378,7 +480,7 @@ fn filter(record: &bam::lazy::Record) -> bool {
     !flags.is_unmapped()
         && record
             .mapping_quality()
-            .map(|mapq| mapq >= MIN_MAPPING_QUALITY)
+            .map(|mapq| mapq >= min_mapping_quality)
             .unwrap_or(true)
         && !flags.is_secondary()
         && !flags.is_supplementary()

@@ -9,6 +9,7 @@
 - **Multithreading Support**: Utilizes Rust's powerful concurrency model for improved performance.
 - **Dynamic Binning**: Bins the genome dynamically based on total read counts and genome length.
 - **CNV Calculation**: Accurately calculates CNV values for each bin across different contigs.
+- **Directory Support**: Supports processing of multiple BAM files in a directory. (Requires alignment to the same reference in all BAM files)
 
 ## Installation
 
@@ -46,7 +47,32 @@ pub struct CnvResult {
 
 Where `result.cnv` is a hash map containing the Copy Number for each bin of `bin_width` bases for each contig in the reference genome, `result.bin_width` is the width of the bins in bases, and `result.genome_length` is the total length of the genome.
 
-Note that only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored.
+> [!NOTE] **Note**: Only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored.
+
+**Directory analysis**
+To analyse a directory of BAM files, use the `iterate_bam_dir` function:
+
+```rust
+use cnv_from_bam::iterate_bam_dir;
+use std::path::PathBuf;
+let bam_path = PathBuf::from("path/to/bam_directory/");
+// Iterate over the BAM files in teh directory and calculate CNV values for the whole. Number of threads is set to 4 and mapping quality filter is set to 60.
+// If number of threads is not specified, it defaults to the number of logical cores on the machine.
+let result = iterate_bam_file(bam_path, Some(4), Some(60));
+```
+
+This again returns a CnvResult, but this time the CNV values are summed across all BAM files in the directory. The bin width and genome length are calculated based on the first BAM file in the directory.
+
+> [!NOTE] **Note**: All BAM files in the directory must be aligned to the same reference genome.
+>
+## Python Integration
+
+`cnv_from_bam` can be used in Python using the PyO3 bindings. To install the Python bindings, run:
+
+`pip install cnv_from_bam`
+
+The same `iterate_bam_file`  is available in python, accepting a path to a BAM file or a directory of BAM files, the number of threads (set to `None` to use the optimal number of threads for the machine), and the mapping quality filter.
+```python
 
 Example simple plot in python
 ```python
@@ -84,6 +110,8 @@ Contributions to `cnv_from_bam` are welcome!
 We use pre-commit hooks (particularly `cargo-fmt` and `ruff`) to ensure that code is formatted correctly and passes all tests before being committed. To install the pre-commit hooks, run:
 
 ```bash
+git clone https://github.com/Adoni5/cnv_from_bam.git
+cd cnv_from_bam
 pip install -e .[dev]
 pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
