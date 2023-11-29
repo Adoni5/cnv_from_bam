@@ -123,4 +123,4 @@ pre-commit run --all-files
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Mozilla Public License 2.0](LICENSE).

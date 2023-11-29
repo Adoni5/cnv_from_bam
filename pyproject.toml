@@ -17,7 +17,7 @@ readme = "README.md"
 authors = [
   { name = "Adoni5", email = "roryjmunro1@gmail.com" },
 ]
-license = "MIT"
+license = "MPL2"
 
 
 [project.urls]
