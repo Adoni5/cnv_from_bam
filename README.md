@@ -80,7 +80,16 @@ cargo doc --open
 
 Contributions to `cnv_from_bam` are welcome!
 
+We use pre-commit hooks (particularly `cargo-fmt` and `ruff`) to ensure that code is formatted correctly and passes all tests before being committed. To install the pre-commit hooks, run:
+
+```bash
+pip install -e .[dev]
+pre-commit install -t pre-commit -t post-checkout -t post-merge
+pre-commit run --all-files
+```
+
+```bash
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
