@@ -52,13 +52,14 @@ Example simple plot in python
 ```python
 from matplotlib import pyplot as plt
 import matplotlib as mpl
+from pathlib import Path
 import numpy as np
 fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8, 3))
 total = 0
-let bam_path = PathBuf::from("path/to/bam/file.bam");
+bam_path = Path("path/to/bam/file.bam");
 # Iterate over the BAM file and calculate CNV values for each bin. Number of threads is set to 4 and mapping quality filter is set to 60.
-# If number of threads is not specified, it defaults to the number of logical cores on the machine.
-let result = iterate_bam_file(bam_path, Some(4), Some(60));
+# If number of threads is not specified, it defaults to the optimal number of threads for the machine.
+result = iterate_bam_file(bam_path, _threads=4, mapq_filter=60);
 for contig, cnv in result.cnv.items():
     ax.scatter(x=np.arange(len(cnv)) + total, y=cnv, s =0.1)
     total += len(cnv)
@@ -83,4 +84,3 @@ Contributions to `cnv_from_bam` are welcome!
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
