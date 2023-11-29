@@ -349,7 +349,7 @@ fn _iterate_bam_file(
     let mut record = bam::lazy::Record::default();
 
     while bam_reader.read_lazy_record(&mut record)? != 0 {
-        if filter(&record) {
+        if filter(&record, mapq_filter) {
             let reference_sequence_name =
                 reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
             let start = record.alignment_start()?.expect("missing alignment start");
@@ -469,9 +469,8 @@ fn iterate_bam_file(
 }
 
 /// Filters a BAM record based on mapping quality and flags.
-fn filter(record: &bam::lazy::Record) -> bool {
-    /// It's the minimum mapping quality we want to consider.
-    const MIN_MAPPING_QUALITY: MappingQuality = match MappingQuality::new(60) {
+fn filter(record: &bam::lazy::Record, mapping_quality: u8) -> bool {
+    let min_mapping_quality: MappingQuality = match MappingQuality::new(mapping_quality) {
         Some(mapq) => mapq,
         None => unreachable!(),
     };
@@ -481,7 +480,7 @@ fn filter(record: &bam::lazy::Record) -> bool {
     !flags.is_unmapped()
         && record
             .mapping_quality()
-            .map(|mapq| mapq >= MIN_MAPPING_QUALITY)
+            .map(|mapq| mapq >= min_mapping_quality)
             .unwrap_or(true)
         && !flags.is_secondary()
         && !flags.is_supplementary()
