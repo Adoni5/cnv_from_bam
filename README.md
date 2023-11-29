@@ -99,6 +99,7 @@ Should look something like this. Obviously the cnv data is just a dictionary of 
 ![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)
 
 ## Output
+This is new in version >= 0.3. If you just want raw stdout from rust and no faffing with loggers, use v0.2.
 ### Progress Bar
 By default, a progress bar is displayed, showing the progress of the iteration of each BAM file. To disable the progress bar, set the `CI` environment variable to `1` in your python script:
 
