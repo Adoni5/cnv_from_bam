@@ -110,7 +110,7 @@ os.environ["CI"] = "1"
 ### Logging
 We use PyO3-log for rust/python interop logging. By default, the log level is set to `INFO`.
 
-> [!WARN]
+> [!WARNING]
 > It is required to set up a logger before a call to `iterate_bam_file` is made. If no logger is set up, the program will not output anything. To set up a logger, run the following code before calling `iterate_bam_file`:
 
 ```python
