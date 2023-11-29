@@ -57,8 +57,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::{error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
+use std::{env, error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
 
+use log::{error, info, warn};
 use noodles::{
     bam, csi,
     sam::{self, record::MappingQuality},
@@ -204,8 +205,6 @@ pub fn calculate_cnv(
         .collect::<Vec<_>>();
 
     let median_value: f64 = median(&mut all_values).unwrap().round();
-    println!("Median value: {}", median_value);
-
     let new_map: FnvHashMap<String, Vec<f64>> = bins
         .into_par_iter()
         .map(|(k, v)| {
@@ -378,7 +377,7 @@ fn _iterate_bam_file(
                     bar
                 }
                 Err(_) => {
-                    println!("No index found for bam file: {:?}", bam_file.path);
+                    warn!("No index found for bam file: {:?}", bam_file.path);
                     let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
                         .with_message("BAM Records");
                     bar.set_style(
@@ -396,6 +395,9 @@ fn _iterate_bam_file(
             bar
         }
     };
+    if env::var("CI").is_ok() {
+        bar.set_draw_target(ProgressDrawTarget::hidden())
+    }
 
     // Get total number of reads, mapped and unmapped
 
@@ -422,7 +424,7 @@ fn _iterate_bam_file(
         bar.inc(1)
     }
     bar.finish();
-    println!(
+    info!(
         "Number of reads matching criteria mapq >{} and aligned: {} for bam file: {:?}",
         mapq_filter, _valid_number_reads, bam_file.path
     );
@@ -477,7 +479,7 @@ fn iterate_bam_file(
     let valid_number_reads = &mut 0_usize;
     let contigs: &mut HashSet<String> = &mut HashSet::new();
     if bam_file_path.is_dir() {
-        println!("Process directory: {:?}", &bam_file_path);
+        info!("Processing directory: {:?}", &bam_file_path);
         // Iterate over all files in the directory
         for entry in fs::read_dir(&bam_file_path)? {
             let entry = entry?;
@@ -486,7 +488,7 @@ fn iterate_bam_file(
             // Check if the entry is a file and ends with .bam
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("bam") {
                 // Process the .bam file
-                println!("Processing BAM file: {:?}", path);
+                info!("Processing BAM file: {:?}", path);
                 // Insert your BAM file processing logic here
                 _iterate_bam_file(
                     path,
@@ -503,7 +505,7 @@ fn iterate_bam_file(
         && bam_file_path.extension().and_then(|s| s.to_str()).unwrap() == "bam"
     {
         // The path is a single .bam file
-        println!("Processing single BAM file: {:?}", &bam_file_path);
+        info!("Processing single BAM file: {:?}", &bam_file_path);
         // Insert your BAM file processing logic here
         _iterate_bam_file(
             bam_file_path,
@@ -515,7 +517,7 @@ fn iterate_bam_file(
         )?;
     } else {
         // The path is neither a directory nor a .bam file
-        println!("The path is neither a directory nor a .bam file.");
+        error!("The path is neither a directory nor a .bam file.");
     }
 
     let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
@@ -566,6 +568,7 @@ fn reference_sequence_name<'a>(
 /// A Python module implemented in Rust.
 #[pymodule]
 fn cnv_from_bam(_py: Python, m: &PyModule) -> PyResult<()> {
+    pyo3_log::init();
     m.add_function(wrap_pyfunction!(iterate_bam_file, m)?)?;
     Ok(())
 }
@@ -579,8 +582,8 @@ mod tests {
         // Call the function with the temporary BAM file
         let bam_file_path = PathBuf::from("test/test.bam");
         let result =
-            iterate_bam_file(bam_file_path.clone(), None, Some(60)).expect("Function failed");
-        println!("{:#?}", result);
+            iterate_bam_file(bam_file_path, Some(4), Some(60)).expect("Error processing BAM file");
+        info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
         // assert_eq!(result.bins, vec![0, 0]);
     }

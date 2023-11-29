@@ -97,6 +97,46 @@ ax.set_xlim((0, total))
 ```
 Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
 ![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)
+
+## Output
+### Progress Bar
+By default, a progress bar is displayed, showing the progress of the iteration of each BAM file. To disable the progress bar, set the `CI` environment variable to `1` in your python script:
+
+```python
+import os
+os.environ["CI"] = "1"
+```
+
+### Logging
+We use PyO3-log for rust/python interop logging. By default, the log level is set to `INFO`.
+
+> [!WARN]
+> It is required to set up a logger before a call to `iterate_bam_file` is made. If no logger is set up, the program will not output anything. To set up a logger, run the following code before calling `iterate_bam_file`:
+
+```python
+import logging
+import sys
+FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
+logging.basicConfig(format=FORMAT)
+logger = logging.getLogger("cnv_from_bam")
+logger.handlers.clear()
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+```
+
+It is possible to hide the log messages by setting the log level to `WARN`:
+
+```python
+import logging
+import sys
+FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
+logging.basicConfig(format=FORMAT)
+logger = logging.getLogger("cnv_from_bam")
+logger.handlers.clear()
+logger.setLevel(logging.WARN)
+logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+```
+
 ## Documentation
 
 To generate the documentation, run:
@@ -119,7 +159,7 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 
-```bash
+
 
 ## License
 
