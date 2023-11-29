@@ -51,13 +51,11 @@
 
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
-use noodles::bam::indexed_reader::Builder;
-use noodles::sam::alignment::Record;
 use std::{error::Error, path::PathBuf};
 
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::{collections::HashMap, env, fs::File, io, num::NonZeroUsize, thread};
+use std::{fs::File, io, num::NonZeroUsize, thread};
 
 use noodles::{
     bam, csi,
