@@ -281,7 +281,7 @@ fn iterate_bam_file(
         )
     });
     bam_reader
-        .set_threads(threads.unwrap_or(num_cpus::get()))
+        .set_threads(threads.unwrap_or(usize::from(std::thread::available_parallelism().unwrap())))
         .expect("Error setting threads");
     let header = bam_reader.header().to_owned();
     let num_targets = header.target_count();
