@@ -10,7 +10,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 pyo3 = "0.20.0"
-noodles ={ version = "0.59.0", features = ["bam", "sam"] }
+noodles ={ version = "0.59.0", features = ["bam", "sam", "csi"] }
 num_cpus = "1.13"
 fnv = "1.0.7"
 indicatif = {version = "*", features = ["rayon"]}
