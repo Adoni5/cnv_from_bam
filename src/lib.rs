@@ -50,8 +50,9 @@
 //!
 
 use fnv::FnvHashMap;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use noodles::bam::bai;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -313,38 +314,95 @@ fn _iterate_bam_file(
             )));
         }
     }
-    let index = File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
+    // horrendous repetitive, dirty match to try a .csi index, then a .bai index, then no index
+    let bar = match File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
         .map(csi::Reader::new)
-        .unwrap()
-        .read_index()
-        .unwrap();
+    {
+        Ok(mut index) => {
+            let index = index.read_index().unwrap();
+            let (total_mapped, total_unmapped): (u64, u64) = index
+                .reference_sequences()
+                .iter()
+                .map(|x| x.metadata().unwrap())
+                .fold(
+                    (0, 0),
+                    |(mapped_count_acc, unmapped_count_acc), metadata| {
+                        (
+                            mapped_count_acc + metadata.mapped_record_count(),
+                            unmapped_count_acc + metadata.unmapped_record_count(),
+                        )
+                    },
+                );
+            let bar = ProgressBar::with_draw_target(
+                Some(total_mapped + total_unmapped),
+                ProgressDrawTarget::stdout(),
+            )
+            .with_message("BAM Records");
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                )
+                .unwrap()
+                .progress_chars("##-"),
+            );
+            bar
+        }
+        Err(_) => {
+            let bar = match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
+                Ok(index) => {
+                    let (total_mapped, total_unmapped): (u64, u64) = index
+                        .reference_sequences()
+                        .iter()
+                        .map(|x| x.metadata().unwrap())
+                        .fold(
+                            (0, 0),
+                            |(mapped_count_acc, unmapped_count_acc), metadata| {
+                                (
+                                    mapped_count_acc + metadata.mapped_record_count(),
+                                    unmapped_count_acc + metadata.unmapped_record_count(),
+                                )
+                            },
+                        );
+                    let bar = ProgressBar::with_draw_target(
+                        Some(total_mapped + total_unmapped),
+                        ProgressDrawTarget::stdout(),
+                    )
+                    .with_message("BAM Records");
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                        )
+                        .unwrap()
+                        .progress_chars("##-"),
+                    );
+                    bar
+                }
+                Err(_) => {
+                    println!("No index found for bam file: {:?}", bam_file.path);
+                    let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                        .with_message("BAM Records");
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
+                        )
+                        .unwrap()
+                        // For more spinners check out the cli-spinners project:
+                        // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
+                        .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                    );
+                    bar
+                }
+            };
+            bar
+        }
+    };
 
     // Get total number of reads, mapped and unmapped
-    let (total_mapped, total_unmapped): (u64, u64) = index
-        .reference_sequences()
-        .iter()
-        .map(|x| x.metadata().unwrap())
-        .fold(
-            (0, 0),
-            |(mapped_count_acc, unmapped_count_acc), metadata| {
-                (
-                    mapped_count_acc + metadata.mapped_record_count(),
-                    unmapped_count_acc + metadata.unmapped_record_count(),
-                )
-            },
-        );
 
     // number of reads in the bam file that match our criteria
     let mut _valid_number_reads: usize = 0;
     // Setup progress bar
-    let bar = ProgressBar::new(total_mapped + total_unmapped);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-"),
-    );
+
     // Allocate record
     let mut record = bam::lazy::Record::default();
 
@@ -363,6 +421,7 @@ fn _iterate_bam_file(
         }
         bar.inc(1)
     }
+    bar.finish();
     println!(
         "Number of reads matching criteria mapq >{} and aligned: {} for bam file: {:?}",
         mapq_filter, _valid_number_reads, bam_file.path
