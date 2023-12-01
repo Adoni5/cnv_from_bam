@@ -52,19 +52,23 @@
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use noodles::bam::bai;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
-use rayon::prelude::*;
-use std::collections::HashSet;
-use std::{env, error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
-
+use log::LevelFilter;
 use log::{error, info, warn};
+use log::{Level, Metadata, Record};
+use noodles::bam::bai;
 use noodles::{
     bam, csi,
     sam::{self, record::MappingQuality},
 };
 use noodles_bgzf as bgzf;
+use once_cell::sync::Lazy;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::{env, error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
 
 /// Number of reads expected in given bin width on the genome
 const READS_PER_BIN: usize = 100;
@@ -73,6 +77,10 @@ const BIN_SIZE: usize = 1000;
 /// Excpected ploidy
 const PLOIDY: u16 = 2;
 
+/// Global static variable to indicate if the handler is set
+static EXIT: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
+/// Rust based logger
+static LOGGER: SimpleLogger = SimpleLogger;
 /// Dynamic result type for fancy unwrapping
 pub type DynResult<T> = Result<T, Box<dyn Error + 'static>>;
 /// Represents a BAM file with its path.
@@ -81,6 +89,28 @@ pub struct BamFile {
     path: PathBuf,
 }
 
+/// Setup the log for the library
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            println!(
+                "{} ({}) - {} - {}",
+                record.level(),
+                record.target(),
+                record.line().unwrap_or(0),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
 impl BamFile {
     /// Creates a new `BamFile` instance.
     ///
@@ -313,6 +343,7 @@ fn _iterate_bam_file(
             )));
         }
     }
+    // Get total number of reads, mapped and unmapped
     // horrendous repetitive, dirty match to try a .csi index, then a .bai index, then no index
     let bar = match File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
         .map(csi::Reader::new)
@@ -399,16 +430,13 @@ fn _iterate_bam_file(
         bar.set_draw_target(ProgressDrawTarget::hidden())
     }
 
-    // Get total number of reads, mapped and unmapped
-
     // number of reads in the bam file that match our criteria
     let mut _valid_number_reads: usize = 0;
-    // Setup progress bar
 
     // Allocate record
     let mut record = bam::lazy::Record::default();
 
-    while bam_reader.read_lazy_record(&mut record)? != 0 {
+    while (bam_reader.read_lazy_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
         if filter(&record, mapq_filter) {
             let reference_sequence_name =
                 reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
@@ -422,6 +450,11 @@ fn _iterate_bam_file(
             _valid_number_reads += 1;
         }
         bar.inc(1)
+    }
+    if EXIT.load(Ordering::SeqCst) {
+        return Err(PyErr::new::<pyo3::exceptions::PySystemExit, _>(
+            "SIGINT or SIGTERM intercepted, Terminating function",
+        ));
     }
     bar.finish();
     info!(
@@ -472,12 +505,29 @@ fn iterate_bam_file(
     bam_file_path: PathBuf,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
+    log_level: Option<u8>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
     let genome_length = &mut 0_usize;
     let valid_number_reads = &mut 0_usize;
     let contigs: &mut HashSet<String> = &mut HashSet::new();
+    let level_filter = match log_level {
+        Some(level) => match level {
+            0 => LevelFilter::Off,
+            40 => LevelFilter::Error,
+            30 => LevelFilter::Warn,
+            20 => LevelFilter::Info,
+            10 => LevelFilter::Debug,
+            5 => LevelFilter::Trace,
+            _ => LevelFilter::Info,
+        },
+        None => LevelFilter::Info,
+    };
+    if let Ok(()) = log::set_logger(&LOGGER) {
+        log::set_max_level(level_filter)
+    }
+
     if bam_file_path.is_dir() {
         info!("Processing directory: {:?}", &bam_file_path);
         // Iterate over all files in the directory
@@ -568,7 +618,12 @@ fn reference_sequence_name<'a>(
 /// A Python module implemented in Rust.
 #[pymodule]
 fn cnv_from_bam(_py: Python, m: &PyModule) -> PyResult<()> {
-    pyo3_log::init();
+    let r = EXIT.clone();
+    ctrlc::set_handler(move || {
+        r.store(true, Ordering::SeqCst);
+        println!("{}[2J", 27 as char);
+    })
+    .expect("Error setting Ctrl-C handler");
     m.add_function(wrap_pyfunction!(iterate_bam_file, m)?)?;
     Ok(())
 }
@@ -581,8 +636,8 @@ mod tests {
     fn test_iterate_bam_file() {
         // Call the function with the temporary BAM file
         let bam_file_path = PathBuf::from("test/test.bam");
-        let result =
-            iterate_bam_file(bam_file_path, Some(4), Some(60)).expect("Error processing BAM file");
+        let result = iterate_bam_file(bam_file_path, Some(4), Some(60), None)
+            .expect("Error processing BAM file");
         info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
         // assert_eq!(result.bins, vec![0, 0]);

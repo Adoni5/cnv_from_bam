@@ -109,34 +109,32 @@ os.environ["CI"] = "1"
 ```
 
 ### Logging
-We use PyO3-log for rust/python interop logging. By default, the log level is set to `INFO`.
+We use the `log` crate for logging. By default, the log level is set to `INFO`, which means that the program will output the progress of the iteration of each BAM file. To disable all but warning and error logging, set the log level to `WARN` on the `iterate_bam_file` function:
 
-> [!WARNING]
-> It is required to set up a logger before a call to `iterate_bam_file` is made. If no logger is set up, the program will not output anything. To set up a logger, run the following code before calling `iterate_bam_file`:
 
 ```python
+
+
 import logging
-import sys
-FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
-logging.basicConfig(format=FORMAT)
-logger = logging.getLogger("cnv_from_bam")
-logger.handlers.clear()
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+from cnv_from_bam import iterate_bam_file
+iterate_bam_file(bam_path, _threads=4, mapq_filter=60, log_level=logging.getLevelName(logging.WARN))
+
 ```
 
-It is possible to hide the log messages by setting the log level to `WARN`:
+`getLevelName` is a function from the `logging` module that converts the log level to the integer value of the level. These values are
 
-```python
-import logging
-import sys
-FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
-logging.basicConfig(format=FORMAT)
-logger = logging.getLogger("cnv_from_bam")
-logger.handlers.clear()
-logger.setLevel(logging.WARN)
-logger.addHandler(logging.StreamHandler(stream=sys.stdout))
-```
+| Level | Value |
+|-------|-------|
+| CRITICAL | 50 |
+| ERROR | 40 |
+| WARNING | 30 |
+| INFO | 20 |
+| DEBUG | 10 |
+| NOTSET | 0 |
+
+> [!NOTE]
+> In v0.3 a regression was introduced, whereby keeping the GIL for logging meant that BAM reading was suddenly single threaded again. Whilst it was possible to fix this and keep `PyO3-log`, I decided to go for truly maximum speed instead. The only drawback to the removal of `PyO3-log` is that log messages will not be handled by python loggers, so they won't be written out by a file handler, for example.
+
 
 ## Documentation
 
@@ -159,7 +157,24 @@ pip install -e .[dev]
 pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
+## Changelog
 
+### v0.4.0
+* Remove `PyO3-log` for maximum speed. This means that log messages will not be handled by python loggers. Can set log level on call to `iterate_bam_file`
+
+### [v0.3.0](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.0.3)
+* Introduce `PyO3-log` for logging. This means that log messages can be handled by python loggers, so they can be written out by a file handler, for example.
+* **HAS A LARGE PERFORMANCE ISSUE**
+* Can disable progress bar display by setting `CI` environment variable to `1` in python script.
+
+### [v0.2.0](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.0.2)
+* Purely rust based BAM parsing, using noodles.
+* Uses a much more sensible number for threading if not provided.
+* Allows iteration of BAMS in a directory
+
+### [v0.1.0](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.0.1)
+* Initial release
+* Uses `rust-bio/rust-htslib` for BAM parsing. Has to bind C code, is a faff.
 
 
 ## License
