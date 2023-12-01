@@ -10,7 +10,7 @@ def bam_file():
 
 def iterate_bam(bam):
     print(bam)
-    result = iterate_bam_file(Path(bam))
+    result = iterate_bam_file(Path(bam), log_level=30)
     print(len(result.cnv))
 
 
