@@ -305,6 +305,7 @@ fn _iterate_bam_file(
     valid_number_reads: &mut usize,
     frequencies: &mut FnvHashMap<String, Vec<u16>>,
     contigs: Option<&mut HashSet<String>>,
+    exclude_supplementary: Option<bool>,
 ) -> Result<(), PyErr> {
     let bam_file = BamFile::new(bam_file_path);
     // Open bam file
@@ -437,7 +438,7 @@ fn _iterate_bam_file(
     let mut record = bam::lazy::Record::default();
 
     while (bam_reader.read_lazy_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
-        if filter(&record, mapq_filter) {
+        if filter(&record, mapq_filter, exclude_supplementary.unwrap_or(false)) {
             let reference_sequence_name =
                 reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
             let start = record.alignment_start()?.expect("missing alignment start");
@@ -476,6 +477,9 @@ fn _iterate_bam_file(
 /// * `bam_file_path` - A `PathBuf` specifying the path to the BAM file.
 /// * `mapq_filter` - An `Option<u8>` specifying the minimum mapping quality to consider.
 ///                   Alignments with a mapping quality below this value are ignored. Default is 60.
+/// * `_threads` - An `Option<u8>` specifying the number of threads to use. Default is the available parallelism - a sensible number.
+/// * `log_level` - An `Option<u8>` specifying the log level. Default is 20 (INFO).
+/// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
 ///
 /// # Returns
 ///
@@ -501,11 +505,13 @@ fn _iterate_bam_file(
 ///
 /// Note: This function is designed to be used in a Python context through PyO3 bindings.
 #[pyfunction]
+#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true), text_signature = None)]
 fn iterate_bam_file(
     bam_file_path: PathBuf,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
+    exclude_supplementary: Option<bool>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
@@ -547,6 +553,7 @@ fn iterate_bam_file(
                     valid_number_reads,
                     &mut frequencies,
                     Some(contigs),
+                    exclude_supplementary,
                 )
                 .unwrap();
             }
@@ -564,6 +571,7 @@ fn iterate_bam_file(
             valid_number_reads,
             &mut frequencies,
             Some(contigs),
+            exclude_supplementary,
         )?;
     } else {
         // The path is neither a directory nor a .bam file
@@ -580,7 +588,7 @@ fn iterate_bam_file(
 }
 
 /// Filters a BAM record based on mapping quality and flags.
-fn filter(record: &bam::lazy::Record, mapping_quality: u8) -> bool {
+fn filter(record: &bam::lazy::Record, mapping_quality: u8, exclude_supplementary: bool) -> bool {
     let min_mapping_quality: MappingQuality = match MappingQuality::new(mapping_quality) {
         Some(mapq) => mapq,
         None => unreachable!(),
@@ -588,13 +596,17 @@ fn filter(record: &bam::lazy::Record, mapping_quality: u8) -> bool {
 
     let flags = record.flags();
 
-    !flags.is_unmapped()
+    let filter = !flags.is_unmapped()
         && record
             .mapping_quality()
             .map(|mapq| mapq >= min_mapping_quality)
             .unwrap_or(true)
-        && !flags.is_secondary()
-        && !flags.is_supplementary()
+        && !flags.is_secondary();
+    if exclude_supplementary {
+        filter && !flags.is_supplementary()
+    } else {
+        filter
+    }
 }
 
 /// Get the ref seq name
@@ -636,7 +648,7 @@ mod tests {
     fn test_iterate_bam_file() {
         // Call the function with the temporary BAM file
         let bam_file_path = PathBuf::from("test/test.bam");
-        let result = iterate_bam_file(bam_file_path, Some(4), Some(60), None)
+        let result = iterate_bam_file(bam_file_path, Some(4), Some(60), None, None)
             .expect("Error processing BAM file");
         info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
