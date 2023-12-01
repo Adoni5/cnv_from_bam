@@ -31,7 +31,7 @@ use std::path::PathBuf;
 let bam_path = PathBuf::from("path/to/bam/file.bam");
 // Iterate over the BAM file and calculate CNV values for each bin. Number of threads is set to 4 and mapping quality filter is set to 60.
 // If number of threads is not specified, it defaults to the number of logical cores on the machine.
-let result = iterate_bam_file(bam_path, Some(4), Some(60));
+let result = iterate_bam_file(bam_path, Some(4), Some(60), None, None);
 // Process the result...
 ```
 
@@ -117,7 +117,7 @@ We use the `log` crate for logging. By default, the log level is set to `INFO`, 
 
 import logging
 from cnv_from_bam import iterate_bam_file
-iterate_bam_file(bam_path, _threads=4, mapq_filter=60, log_level=logging.getLevelName(logging.WARN))
+iterate_bam_file(bam_path, _threads=4, mapq_filter=60, log_level=int(logging.WARN))
 
 ```
 
