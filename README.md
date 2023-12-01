@@ -158,6 +158,8 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
+### v0.4.1
+* Add `exclude_supplementary` parameter to `iterate_bam_file`, to exclude supplementary alignments
 
 ### v0.4.0
 * Remove `PyO3-log` for maximum speed. This means that log messages will not be handled by python loggers. Can set log level on call to `iterate_bam_file`
