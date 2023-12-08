@@ -55,6 +55,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::LevelFilter;
 use log::{error, info, warn};
 use log::{Level, Metadata, Record};
+use natord::compare;
 use noodles::bam::bai;
 use noodles::{
     bam, csi,
@@ -64,6 +65,7 @@ use noodles_bgzf as bgzf;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,6 +131,51 @@ impl BamFile {
     /// ```
     pub fn new(path: PathBuf) -> Self {
         BamFile { path }
+    }
+}
+
+/// Calculates the variance of a dataset.
+///
+/// The variance is computed as the average of the squared differences from the Mean.
+/// Returns `None` if the dataset is empty.
+///
+/// # Arguments
+///
+/// * `data` - A slice of usize values representing the dataset.
+///
+/// # Returns
+///
+/// An `Option<f64>` representing the variance of the dataset.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// # use cnv_from_bam::calculate_variance;
+/// let data = vec![1, 2, 3, 4, 5];
+/// let variance = calculate_variance(&data).unwrap();
+/// assert_eq!(variance, 2.0);
+/// ```
+///
+/// When the dataset is empty:
+///
+/// ```
+/// # use cnv_from_bam::calculate_variance;
+/// let empty: Vec<usize> = vec![];
+/// assert!(calculate_variance(&empty).is_none());
+/// ```
+pub fn calculate_variance<'a>(data: impl Iterator<Item = &'a f64>) -> Option<f64> {
+    let (count, sum, sum_sq) = data.fold((0, 0.0, 0.0), |(count, sum, sum_sq), &value| {
+        (count + 1, sum + value, sum_sq + value * value)
+    });
+
+    if count == 0 {
+        None
+    } else {
+        let mean = sum / count as f64;
+        let variance = (sum_sq / count as f64) - (mean * mean);
+        Some(variance)
     }
 }
 
@@ -258,13 +305,16 @@ pub fn calculate_cnv(
 pub struct CnvResult {
     /// The CNV per contig
     #[pyo3(get)]
-    pub cnv: FnvHashMap<String, Vec<f64>>,
+    pub cnv: PyObject,
     /// Bin width
     #[pyo3(get)]
     pub bin_width: usize,
     /// Genome length
     #[pyo3(get)]
     pub genome_length: usize,
+    /// Variance of the whole genome
+    #[pyo3(get)]
+    pub variance: f64,
 }
 
 /// Iterates over a BAM file, filters reads based on the mapping quality (`mapq_filter`),
@@ -577,14 +627,27 @@ fn iterate_bam_file(
         // The path is neither a directory nor a .bam file
         error!("The path is neither a directory nor a .bam file.");
     }
-
     let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
-    let result = CnvResult {
-        cnv: cnv_profile,
-        bin_width,
-        genome_length: *genome_length,
-    };
-    Ok(result)
+    let variance = cnv_profile.values().flatten();
+    let variance = calculate_variance(variance).unwrap_or(0.0);
+    let result = Python::with_gil(|py| {
+        let mut sorted_keys: Vec<_> = cnv_profile.keys().collect();
+        sorted_keys.sort_by(|a, b| compare(a, b));
+        let py_dict = PyDict::new(py);
+        for key in sorted_keys {
+            let value = cnv_profile.get(key).unwrap();
+            py_dict.set_item(key, value)?;
+        }
+
+        let result = CnvResult {
+            cnv: py_dict.into(),
+            bin_width,
+            genome_length: *genome_length,
+            variance,
+        };
+        Ok(result)
+    });
+    result
 }
 
 /// Filters a BAM record based on mapping quality and flags.
