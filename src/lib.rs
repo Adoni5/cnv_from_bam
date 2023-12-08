@@ -64,6 +64,7 @@ use noodles_bgzf as bgzf;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -303,7 +304,7 @@ pub fn calculate_cnv(
 pub struct CnvResult {
     /// The CNV per contig
     #[pyo3(get)]
-    pub cnv: FnvHashMap<String, Vec<f64>>,
+    pub cnv: PyObject,
     /// Bin width
     #[pyo3(get)]
     pub bin_width: usize,
@@ -628,13 +629,21 @@ fn iterate_bam_file(
     let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
     let variance = cnv_profile.values().flatten();
     let variance = calculate_variance(variance).unwrap_or(0.0);
-    let result = CnvResult {
-        cnv: cnv_profile,
-        bin_width,
-        genome_length: *genome_length,
-        variance,
-    };
-    Ok(result)
+    let result = Python::with_gil(|py| {
+        let py_dict = PyDict::new(py);
+        for (key, value) in cnv_profile.iter() {
+            py_dict.set_item(key, value)?;
+        }
+
+        let result = CnvResult {
+            cnv: py_dict.into(),
+            bin_width,
+            genome_length: *genome_length,
+            variance,
+        };
+        Ok(result)
+    });
+    result
 }
 
 /// Filters a BAM record based on mapping quality and flags.
