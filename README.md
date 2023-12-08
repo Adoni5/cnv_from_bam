@@ -37,18 +37,32 @@ let result = iterate_bam_file(bam_path, Some(4), Some(60), None, None);
 
 The results in this case are returned as a CnvResult, which has the following structure:
 
-```rust
+/// Results struct for python
+```
+#[pyclass]
+#[derive(Debug)]
 pub struct CnvResult {
-    pub cnv: FnvHashMap<String, Vec<f64>>,
+    /// The CNV per contig
+    #[pyo3(get)]
+    pub cnv: PyObject,
+    /// Bin width
+    #[pyo3(get)]
     pub bin_width: usize,
+    /// Genome length
+    #[pyo3(get)]
     pub genome_length: usize,
+    /// Variance of the whole genome
+    #[pyo3(get)]
+    pub variance: f64,
 }
 ```
 
-Where `result.cnv` is a hash map containing the Copy Number for each bin of `bin_width` bases for each contig in the reference genome, `result.bin_width` is the width of the bins in bases, and `result.genome_length` is the total length of the genome.
+Where `result.cnv` is a Python dict `PyObject` containing the Copy Number for each bin of `bin_width` bases for each contig in the reference genome, `result.bin_width` is the width of the bins in bases, `result.genome_length` is the total length of the genome and `result.variance` is a measure of the variance across the whole genome.
+
+Variance is calculated as the average of the squared differences from the Mean.
 
 > [!NOTE]
-> **Note**: Only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored.
+> **Note**: Only the main primary mapping alignment start is binned, Supplementary and Secondary alignments are ignored. Supplementary alignments can be included by setting `exclude_supplementary`
 
 **Directory analysis**
 To analyse a directory of BAM files, use the `iterate_bam_dir` function:
@@ -81,6 +95,7 @@ Example simple plot in python
 from matplotlib import pyplot as plt
 import matplotlib as mpl
 from pathlib import Path
+from cnv_from_bam import iterate_bam_file
 import numpy as np
 fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8, 3))
 total = 0
@@ -133,7 +148,7 @@ iterate_bam_file(bam_path, _threads=4, mapq_filter=60, log_level=int(logging.WAR
 | NOTSET | 0 |
 
 > [!NOTE]
-> In v0.3 a regression was introduced, whereby keeping the GIL for logging meant that BAM reading was suddenly single threaded again. Whilst it was possible to fix this and keep `PyO3-log`, I decided to go for truly maximum speed instead. The only drawback to the removal of `PyO3-log` is that log messages will not be handled by python loggers, so they won't be written out by a file handler, for example.
+> In v0.3 a regression was introduced, whereby keeping the GIL for logging meant that BAM reading was suddenly single threaded again. Whilst it was possible to fix this and keep `PyO3-log`, I decided to go for truly maximum speed instead. The only drawback to the removal of `PyO3-log` in (v0.4+) is that log messages will not be handled by python loggers, so they won't be written out by a file handler, for example.
 
 
 ## Documentation
@@ -158,8 +173,13 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
+### v0.4.2
+* Returns the contig names naturally sorted, rather than in random order!! For example `chr1, chr2, chr3...chr22,chrM,chrX,chrY`!
+Huge, will prevent some people getting repeatedly confused about expected CNV vs. Visualised and wasting an hour debugging a non existing issue.
+* Returns variance across the whole genome in the CNV result struct.
+
 ### v0.4.1
-* Add `exclude_supplementary` parameter to `iterate_bam_file`, to exclude supplementary alignments
+* Add `exclude_supplementary` parameter to `iterate_bam_file`, to exclude supplementary alignments (default True)
 
 ### v0.4.0
 * Remove `PyO3-log` for maximum speed. This means that log messages will not be handled by python loggers. Can set log level on call to `iterate_bam_file`
