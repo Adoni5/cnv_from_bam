@@ -55,6 +55,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::LevelFilter;
 use log::{error, info, warn};
 use log::{Level, Metadata, Record};
+use natord::compare;
 use noodles::bam::bai;
 use noodles::{
     bam, csi,
@@ -630,8 +631,11 @@ fn iterate_bam_file(
     let variance = cnv_profile.values().flatten();
     let variance = calculate_variance(variance).unwrap_or(0.0);
     let result = Python::with_gil(|py| {
+        let mut sorted_keys: Vec<_> = cnv_profile.keys().collect();
+        sorted_keys.sort_by(|a, b| compare(a, b));
         let py_dict = PyDict::new(py);
-        for (key, value) in cnv_profile.iter() {
+        for key in sorted_keys {
+            let value = cnv_profile.get(key).unwrap();
             py_dict.set_item(key, value)?;
         }
 

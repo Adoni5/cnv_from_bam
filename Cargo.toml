@@ -19,6 +19,7 @@ noodles-bgzf = { version = "0.25.0", features = ["libdeflate"] }
 log = "0.4"
 ctrlc = { version = "3.4.1", features = ["termination"] }
 once_cell = { version = "1.18.0", features = ["parking_lot"] }
+natord = "1.0.9"
 
 
 [features]
