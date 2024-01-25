@@ -88,9 +88,8 @@ This again returns a CnvResult, but this time the CNV values are summed across a
 `pip install cnv_from_bam`
 
 The same `iterate_bam_file`  is available in python, accepting a path to a BAM file or a directory of BAM files, the number of threads (set to `None` to use the optimal number of threads for the machine), and the mapping quality filter.
-```python
 
-Example simple plot in python
+Example simple plot in python, you will need `matplotlib` an `numpy` installed (`pip install matplotlib numpy`)
 ```python
 from matplotlib import pyplot as plt
 import matplotlib as mpl
@@ -109,6 +108,7 @@ for contig, cnv in result.cnv.items():
 
 ax.set_ylim((0,8))
 ax.set_xlim((0, total))
+fig.savefig("Example_cnv_plot.png")
 ```
 Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
 ![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)

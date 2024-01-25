@@ -280,7 +280,7 @@ pub fn calculate_cnv(
         .chunks(chunk_size)
         .map(|chunk| chunk.iter().sum::<u16>())
         .collect::<Vec<_>>();
-
+    // info!("{bins.keys():#?}");
     let median_value: f64 = median(&mut all_values).unwrap().round();
     let new_map: FnvHashMap<String, Vec<f64>> = bins
         .into_par_iter()
@@ -517,6 +517,91 @@ fn _iterate_bam_file(
     Ok(())
 }
 
+/// Merge two vectors, summing the values at each index.
+///
+/// The function takes two slices of u16 values (`vec1` and `vec2`) and returns a new vector
+/// where the values at each index are the sum of the corresponding values from both input vectors.
+/// If one vector is shorter than the other, the missing elements are assumed to be 0.
+///
+/// # Arguments
+///
+/// * `vec1` - A slice of u16 values representing the first vector.
+/// * `vec2` - A slice of u16 values representing the second vector.
+///
+/// # Returns
+///
+/// A new vector containing the sum of values at each index from both input vectors.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let vec1 = vec![1, 2, 3];
+/// let vec2 = vec![4, 5, 6];
+///
+/// let result = merge_vecs(&vec1, &vec2);
+/// assert_eq!(result, vec![5, 7, 9]);
+/// ```
+///
+/// ```
+/// let vec1 = vec![1, 2, 3];
+/// let vec2 = vec![4, 5, 6, 7];
+///
+/// let result = merge_vecs(&vec1, &vec2);
+/// assert_eq!(result, vec![5, 7, 9, 7]);
+/// ```
+fn merge_vecs(vec1: &[u16], vec2: &[u16]) -> Vec<u16> {
+    // Determine the length of the merged vector
+    let merged_len = vec1.len().max(vec2.len());
+
+    // Use zip to iterate over both vectors simultaneously, summing the values at each index
+    let merged_vec: Vec<u16> = vec1
+        .iter()
+        .chain(std::iter::repeat(&0).take(merged_len - vec1.len()))
+        .zip(vec2.iter())
+        .map(|(a, b)| a + b)
+        .collect();
+
+    merged_vec
+}
+
+/// Merge a pydict with a hashmap, and then reset the pydict to have the updated values
+fn merge_and_reset(
+    py_dict: &PyDict,
+    rust_map: FnvHashMap<String, Vec<u16>>,
+) -> PyResult<FnvHashMap<String, Vec<u16>>> {
+    // Acquire the GIL
+    Python::with_gil(|py| -> PyResult<FnvHashMap<String, Vec<u16>>> {
+        // Convert PyDict to HashMap
+        let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
+            .iter()
+            .map(|(key, value)| {
+                let key_str = key.to_string();
+                let value_list: Vec<u16> = value.extract().unwrap_or_default();
+                (key_str, value_list)
+            })
+            .collect();
+
+        // Merge values from rust_map into py_dict_map
+        let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
+            .into_iter()
+            .map(|(rust_key, rust_value)| {
+                let merged_values: Vec<u16> =
+                    merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
+                (rust_key, merged_values)
+            })
+            .collect();
+
+        // Reset values of the Python dictionary to the updated HashMap values
+        py_dict.clear();
+        for (key, values) in merged_map.clone() {
+            let py_key = key.to_object(py);
+            let py_values = values.to_object(py);
+            py_dict.set_item(py_key, py_values)?;
+        }
+        Ok(merged_map)
+    })
+}
+
 /// Iterates over a BAM file to compute Copy Number Variation (CNV) profiles for each contig.
 ///
 /// This function reads through a BAM file, filters the alignments based on mapping quality,
@@ -530,6 +615,8 @@ fn _iterate_bam_file(
 /// * `_threads` - An `Option<u8>` specifying the number of threads to use. Default is the available parallelism - a sensible number.
 /// * `log_level` - An `Option<u8>` specifying the log level. Default is 20 (INFO).
 /// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
+/// * `copy_numbers` - A python dictionary (Optional) - this will be mutated in place with the intermediate binned
+///                    Read starts per contig, so we can iteratively update them.
 ///
 /// # Returns
 ///
@@ -555,13 +642,14 @@ fn _iterate_bam_file(
 ///
 /// Note: This function is designed to be used in a Python context through PyO3 bindings.
 #[pyfunction]
-#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true), text_signature = None)]
+#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None), text_signature = None,)]
 fn iterate_bam_file(
     bam_file_path: PathBuf,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
     exclude_supplementary: Option<bool>,
+    copy_numbers: Option<&PyDict>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
@@ -585,6 +673,12 @@ fn iterate_bam_file(
     }
 
     if bam_file_path.is_dir() {
+        if copy_numbers.is_some() {
+            error!("Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.");
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+            ));
+        }
         info!("Processing directory: {:?}", &bam_file_path);
         // Iterate over all files in the directory
         for entry in fs::read_dir(&bam_file_path)? {
@@ -626,11 +720,31 @@ fn iterate_bam_file(
     } else {
         // The path is neither a directory nor a .bam file
         error!("The path is neither a directory nor a .bam file.");
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+        ));
     }
+    // If we have been given a data structure to use for the frequencies, update it here, and use the
+    // combined values to calculate CNV
+    let frequencies = if let Some(copy_numbers) = copy_numbers {
+        let frequencies = merge_and_reset(copy_numbers, frequencies).unwrap();
+        // # Update the number of reads that we have seen, to include the new and old counts
+        *valid_number_reads = frequencies
+            .values()
+            .map(|x| x.par_iter().map(|x| *x as usize).sum::<usize>())
+            .sum();
+        frequencies
+    } else {
+        frequencies
+    };
+
+    // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
     let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
     let variance = cnv_profile.values().flatten();
     let variance = calculate_variance(variance).unwrap_or(0.0);
-    let result = Python::with_gil(|py| {
+    // let variance = cnv_profile.values().flatten();
+    // let variance = calculate_variance(variance).unwrap_or(0.0);
+    let result = Python::with_gil(|py| -> PyResult<CnvResult> {
         let mut sorted_keys: Vec<_> = cnv_profile.keys().collect();
         sorted_keys.sort_by(|a, b| compare(a, b));
         let py_dict = PyDict::new(py);
@@ -711,9 +825,9 @@ mod tests {
     fn test_iterate_bam_file() {
         // Call the function with the temporary BAM file
         let bam_file_path = PathBuf::from("test/test.bam");
-        let result = iterate_bam_file(bam_file_path, Some(4), Some(60), None, None)
+        let _result = iterate_bam_file(bam_file_path, Some(4), Some(60), None, None, None)
             .expect("Error processing BAM file");
-        info!("{:#?}", result);
+        // info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
         // assert_eq!(result.bins, vec![0, 0]);
     }
@@ -750,5 +864,26 @@ mod tests {
         let mut numbers = [42];
         let result = median(&mut numbers).unwrap();
         assert_eq!(result, 42.0);
+    }
+
+    #[test]
+    fn test_merge_vecs() {
+        // Test with equal-length vectors
+        let vec1 = vec![1, 2, 3];
+        let vec2 = vec![4, 5, 6];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![5, 7, 9]);
+
+        // Test with the first vector shorter than the second one
+        let vec1 = vec![1, 2, 3];
+        let vec2 = vec![4, 5, 6, 7];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![5, 7, 9, 7]);
+
+        // Test with an empty first vector
+        let vec1: Vec<u16> = Vec::new();
+        let vec2 = vec![4, 5, 6];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![4, 5, 6]);
     }
 }
