@@ -128,7 +128,7 @@ result = iterate_bam_file(bam_path, _threads=4, mapq_filter=60, copy_numbers=upd
 
 bam_path_2 = Path("path/to/bam/file2.bam");
 result = iterate_bam_file(bam_path_2, _threads=4, mapq_filter=60, copy_numbers=update);
-# Result now contains the copy number as contained by both BAMS
+# Result now contains the copy number as inferred by both BAMS
 ```
 
 ## Output
@@ -191,6 +191,18 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
+### v0.4.3
+### Iterative use
+* It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.
+This is limited to parsing files one at a time, rather than by directory.
+See example above under [iterative use.](#iterative-use)
+
+* Catches bug where metadata (mapped and unmapped count) for a reference sequence in a BAI or CSI file would return None, and crash the calculation. As this
+was used to calculate the Progress bar total, just skips the offending reference sequence, returning - for both counts. May mean the progress bar can have a lower total than number of reads, but won't matter to final numbers.
+
+* Adds Cargo tests to CI
+
+
 ### v0.4.2
 * Returns the contig names naturally sorted, rather than in random order!! For example `chr1, chr2, chr3...chr22,chrM,chrX,chrY`!
 Huge, will prevent some people getting repeatedly confused about expected CNV vs. Visualised and wasting an hour debugging a non existing issue.
