@@ -368,9 +368,9 @@ fn total_sequences(index: csi::Index) -> Option<u64> {
         );
     total_mapped += total_unmapped;
     if total_mapped == 0 {
-        Some(total_mapped)
-    } else {
         None
+    } else {
+        Some(total_mapped)
     }
 }
 
@@ -892,9 +892,46 @@ mod tests {
     #[test]
     fn test_iterate_bam_file() {
         // Call the function with the temporary BAM file
-        let bam_file_path = PathBuf::from("test/test.bam");
-        let _result = iterate_bam_file(bam_file_path, Some(4), Some(60), None, None, None)
-            .expect("Error processing BAM file");
+        let bam_file_path = PathBuf::from("test/NA12878_4000_test.bam");
+        let genome_length = &mut 0_usize;
+        let valid_number_reads = &mut 0_usize;
+        let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+        let contigs: &mut HashSet<String> = &mut HashSet::new();
+        _iterate_bam_file(
+            bam_file_path,
+            60,
+            genome_length,
+            valid_number_reads,
+            &mut frequencies,
+            Some(contigs),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(valid_number_reads, &mut 3702_usize);
+        // info!("{:#?}", result);
+        // Assert that the function returns a CnvBins instance
+        // assert_eq!(result.bins, vec![0, 0]);
+    }
+
+    #[test]
+    fn test_iterate_bam_file_no_supp() {
+        // Call the function with the temporary BAM file
+        let bam_file_path = PathBuf::from("test/NA12878_4000_test.bam");
+        let genome_length = &mut 0_usize;
+        let valid_number_reads = &mut 0_usize;
+        let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+        let contigs: &mut HashSet<String> = &mut HashSet::new();
+        _iterate_bam_file(
+            bam_file_path,
+            60,
+            genome_length,
+            valid_number_reads,
+            &mut frequencies,
+            Some(contigs),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(valid_number_reads, &mut 3561_usize);
         // info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
         // assert_eq!(result.bins, vec![0, 0]);
@@ -953,5 +990,98 @@ mod tests {
         let vec2 = vec![4, 5, 6];
         let result = merge_vecs(&vec1, &vec2);
         assert_eq!(result, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn test_total_sequences_empty_index() {
+        // Create a mock BAM index for testing
+        let index = csi::Index::default();
+
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // Since the mock index has no actual data, the result should be `Some(0)`
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_total_sequences_non_empty_index() {
+        use noodles::csi::{
+            self as csi,
+            index::{reference_sequence, ReferenceSequence},
+        };
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let metadata = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            55,
+            55,
+        );
+        let reference_sequences = vec![ReferenceSequence::new(
+            Default::default(),
+            Default::default(),
+            Some(metadata),
+        )];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, Some(110));
+    }
+
+    #[test]
+    fn test_total_sequences_non_empty_index_no_metadata() {
+        use noodles::csi::{self as csi, index::ReferenceSequence};
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let reference_sequences = vec![ReferenceSequence::new(
+            Default::default(),
+            Default::default(),
+            None,
+        )];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_total_sequences_mixed_metadata() {
+        use noodles::csi::{
+            self as csi,
+            index::{reference_sequence, ReferenceSequence},
+        };
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let metadata = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            55,
+            55,
+        );
+        let metadata2 = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            7,
+            14,
+        );
+        let reference_sequences = vec![
+            ReferenceSequence::new(Default::default(), Default::default(), Some(metadata)),
+            ReferenceSequence::new(Default::default(), Default::default(), None),
+            ReferenceSequence::new(Default::default(), Default::default(), Some(metadata2)),
+        ];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, Some(131));
     }
 }
