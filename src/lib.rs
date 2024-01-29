@@ -317,6 +317,63 @@ pub struct CnvResult {
     pub variance: f64,
 }
 
+/// Get the total number of sequences from a BAM index, returning `Some(count)` if the operation
+/// is successful, or `None` if there is an issue opening any of the sequences.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use noodles::csi;
+///
+/// // Create a mock BAM index for testing
+/// let index = csi::Index::default();
+///
+/// // Get the total sequences
+/// let result = total_sequences(index);
+///
+/// // Since the mock index has no actual data, the result should be `Some(0)`
+/// assert_eq!(result, Some(0));
+/// ```
+///
+/// ```rust,ignore
+/// use noodles::csi;
+///
+/// // Create a mock BAM index with some metadata for testing
+/// let mut index = csi::Index::default();
+/// index.reference_sequences_mut().push(csi::ReferenceSequence::new(0, 10, 5, 5, 0));
+///
+/// // Get the total sequences
+/// let result = total_sequences(index);
+///
+/// // The total sequences in the mock index is 5, so the result should be `Some(5)`
+/// assert_eq!(result, Some(5));
+/// ```
+fn total_sequences(index: csi::Index) -> Option<u64> {
+    let (mut total_mapped, total_unmapped): (u64, u64) = index
+        .reference_sequences()
+        .iter()
+        .map(|x| x.metadata())
+        .fold(
+            (0, 0),
+            |(mapped_count_acc, unmapped_count_acc), metadata_option| {
+                metadata_option
+                    .map(|metadata| {
+                        (
+                            mapped_count_acc + metadata.mapped_record_count(),
+                            unmapped_count_acc + metadata.unmapped_record_count(),
+                        )
+                    })
+                    .unwrap_or((mapped_count_acc, unmapped_count_acc))
+            },
+        );
+    total_mapped += total_unmapped;
+    if total_mapped == 0 {
+        Some(total_mapped)
+    } else {
+        None
+    }
+}
+
 /// Iterates over a BAM file, filters reads based on the mapping quality (`mapq_filter`),
 /// and populates the provided frequency map with read counts for each genomic bin.
 ///
@@ -401,51 +458,11 @@ fn _iterate_bam_file(
     {
         Ok(mut index) => {
             let index = index.read_index().unwrap();
-            let (total_mapped, total_unmapped): (u64, u64) = index
-                .reference_sequences()
-                .iter()
-                .map(|x| x.metadata().unwrap())
-                .fold(
-                    (0, 0),
-                    |(mapped_count_acc, unmapped_count_acc), metadata| {
-                        (
-                            mapped_count_acc + metadata.mapped_record_count(),
-                            unmapped_count_acc + metadata.unmapped_record_count(),
-                        )
-                    },
-                );
-            let bar = ProgressBar::with_draw_target(
-                Some(total_mapped + total_unmapped),
-                ProgressDrawTarget::stdout(),
-            )
-            .with_message("BAM Records");
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-                )
-                .unwrap()
-                .progress_chars("##-"),
-            );
-            bar
-        }
-        Err(_) => {
-            let bar = match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
-                Ok(index) => {
-                    let (total_mapped, total_unmapped): (u64, u64) = index
-                        .reference_sequences()
-                        .iter()
-                        .map(|x| x.metadata().unwrap())
-                        .fold(
-                            (0, 0),
-                            |(mapped_count_acc, unmapped_count_acc), metadata| {
-                                (
-                                    mapped_count_acc + metadata.mapped_record_count(),
-                                    unmapped_count_acc + metadata.unmapped_record_count(),
-                                )
-                            },
-                        );
+
+            match total_sequences(index) {
+                Some(total_sequences) => {
                     let bar = ProgressBar::with_draw_target(
-                        Some(total_mapped + total_unmapped),
+                        Some(total_sequences),
                         ProgressDrawTarget::stdout(),
                     )
                     .with_message("BAM Records");
@@ -457,6 +474,58 @@ fn _iterate_bam_file(
                         .progress_chars("##-"),
                     );
                     bar
+                }
+                None => {
+                    let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                        .with_message("BAM Records");
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
+                        )
+                        .unwrap()
+                        // For more spinners check out the cli-spinners project:
+                        // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
+                        .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                    );
+                    bar
+                }
+            }
+        }
+        Err(_) => {
+            match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
+                Ok(index) => {
+                    match total_sequences(index) {
+                        Some(total_sequences) => {
+                            let bar = ProgressBar::with_draw_target(
+                                Some(total_sequences),
+                                ProgressDrawTarget::stdout(),
+                            )
+                            .with_message("BAM Records");
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                                )
+                                .unwrap()
+                                .progress_chars("##-"),
+                            );
+                            bar
+                        }
+                        None => {
+                            let bar =
+                                ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                                    .with_message("BAM Records");
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
+                                )
+                                .unwrap()
+                                // For more spinners check out the cli-spinners project:
+                                // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
+                                .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                            );
+                            bar
+                        }
+                    }
                 }
                 Err(_) => {
                     warn!("No index found for bam file: {:?}", bam_file.path);
@@ -473,8 +542,7 @@ fn _iterate_bam_file(
                     );
                     bar
                 }
-            };
-            bar
+            }
         }
     };
     if env::var("CI").is_ok() {
