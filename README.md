@@ -124,10 +124,10 @@ This is limited to parsing files one at a time, rather than by directory.
 from cnv_from_bam import iterate_bam_file
 update = {}
 bam_path = Path("path/to/bam/file.bam");
-result = iterate_bam_file(bam_path, _threads=4, mapq_filter=60, copy_number=update);
+result = iterate_bam_file(bam_path, _threads=4, mapq_filter=60, copy_numbers=update);
 
 bam_path_2 = Path("path/to/bam/file2.bam");
-result = iterate_bam_file(bam_path_2, _threads=4, mapq_filter=60, copy_number=update);
+result = iterate_bam_file(bam_path_2, _threads=4, mapq_filter=60, copy_numbers=update);
 # Result now contains the copy number as contained by both BAMS
 ```
 
