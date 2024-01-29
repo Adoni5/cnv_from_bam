@@ -191,7 +191,7 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
-### v0.4.3
+### [v0.4.3](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.3)
 ### Iterative use
 * It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.
 This is limited to parsing files one at a time, rather than by directory.
