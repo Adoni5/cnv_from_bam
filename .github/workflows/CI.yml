@@ -20,7 +20,7 @@ permissions:
 
 
 env:
-  PYTHON_LATEST: "3.11"
+  PYTHON_LATEST: "3.12"
 
 
 jobs:
@@ -36,9 +36,22 @@ jobs:
         cache: pip
     - uses: "pre-commit/action@v3.0.0"
 
-  linux:
+  cargo-test:
+    name: cargo test
     runs-on: ubuntu-latest
     needs: pre_commit
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive' # Fetch Git submodules recursively
+    - name: Update submodules
+      run: git submodule update --init --recursive
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo test --no-default-features
+
+  linux:
+    runs-on: ubuntu-latest
+    needs: ["pre_commit", "cargo-test"]
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -86,7 +99,7 @@ jobs:
 
   macos:
     runs-on: macos-13
-    needs: pre_commit
+    needs: ["pre_commit", "cargo-test"]
     strategy:
       matrix:
         target: [x86_64, aarch64]

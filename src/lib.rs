@@ -280,7 +280,7 @@ pub fn calculate_cnv(
         .chunks(chunk_size)
         .map(|chunk| chunk.iter().sum::<u16>())
         .collect::<Vec<_>>();
-
+    // info!("{bins.keys():#?}");
     let median_value: f64 = median(&mut all_values).unwrap().round();
     let new_map: FnvHashMap<String, Vec<f64>> = bins
         .into_par_iter()
@@ -315,6 +315,63 @@ pub struct CnvResult {
     /// Variance of the whole genome
     #[pyo3(get)]
     pub variance: f64,
+}
+
+/// Get the total number of sequences from a BAM index, returning `Some(count)` if the operation
+/// is successful, or `None` if there is an issue opening any of the sequences.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use noodles::csi;
+///
+/// // Create a mock BAM index for testing
+/// let index = csi::Index::default();
+///
+/// // Get the total sequences
+/// let result = total_sequences(index);
+///
+/// // Since the mock index has no actual data, the result should be `Some(0)`
+/// assert_eq!(result, Some(0));
+/// ```
+///
+/// ```rust,ignore
+/// use noodles::csi;
+///
+/// // Create a mock BAM index with some metadata for testing
+/// let mut index = csi::Index::default();
+/// index.reference_sequences_mut().push(csi::ReferenceSequence::new(0, 10, 5, 5, 0));
+///
+/// // Get the total sequences
+/// let result = total_sequences(index);
+///
+/// // The total sequences in the mock index is 5, so the result should be `Some(5)`
+/// assert_eq!(result, Some(5));
+/// ```
+fn total_sequences(index: csi::Index) -> Option<u64> {
+    let (mut total_mapped, total_unmapped): (u64, u64) = index
+        .reference_sequences()
+        .iter()
+        .map(|x| x.metadata())
+        .fold(
+            (0, 0),
+            |(mapped_count_acc, unmapped_count_acc), metadata_option| {
+                metadata_option
+                    .map(|metadata| {
+                        (
+                            mapped_count_acc + metadata.mapped_record_count(),
+                            unmapped_count_acc + metadata.unmapped_record_count(),
+                        )
+                    })
+                    .unwrap_or((mapped_count_acc, unmapped_count_acc))
+            },
+        );
+    total_mapped += total_unmapped;
+    if total_mapped == 0 {
+        None
+    } else {
+        Some(total_mapped)
+    }
 }
 
 /// Iterates over a BAM file, filters reads based on the mapping quality (`mapq_filter`),
@@ -401,51 +458,11 @@ fn _iterate_bam_file(
     {
         Ok(mut index) => {
             let index = index.read_index().unwrap();
-            let (total_mapped, total_unmapped): (u64, u64) = index
-                .reference_sequences()
-                .iter()
-                .map(|x| x.metadata().unwrap())
-                .fold(
-                    (0, 0),
-                    |(mapped_count_acc, unmapped_count_acc), metadata| {
-                        (
-                            mapped_count_acc + metadata.mapped_record_count(),
-                            unmapped_count_acc + metadata.unmapped_record_count(),
-                        )
-                    },
-                );
-            let bar = ProgressBar::with_draw_target(
-                Some(total_mapped + total_unmapped),
-                ProgressDrawTarget::stdout(),
-            )
-            .with_message("BAM Records");
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-                )
-                .unwrap()
-                .progress_chars("##-"),
-            );
-            bar
-        }
-        Err(_) => {
-            let bar = match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
-                Ok(index) => {
-                    let (total_mapped, total_unmapped): (u64, u64) = index
-                        .reference_sequences()
-                        .iter()
-                        .map(|x| x.metadata().unwrap())
-                        .fold(
-                            (0, 0),
-                            |(mapped_count_acc, unmapped_count_acc), metadata| {
-                                (
-                                    mapped_count_acc + metadata.mapped_record_count(),
-                                    unmapped_count_acc + metadata.unmapped_record_count(),
-                                )
-                            },
-                        );
+
+            match total_sequences(index) {
+                Some(total_sequences) => {
                     let bar = ProgressBar::with_draw_target(
-                        Some(total_mapped + total_unmapped),
+                        Some(total_sequences),
                         ProgressDrawTarget::stdout(),
                     )
                     .with_message("BAM Records");
@@ -457,6 +474,58 @@ fn _iterate_bam_file(
                         .progress_chars("##-"),
                     );
                     bar
+                }
+                None => {
+                    let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                        .with_message("BAM Records");
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
+                        )
+                        .unwrap()
+                        // For more spinners check out the cli-spinners project:
+                        // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
+                        .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                    );
+                    bar
+                }
+            }
+        }
+        Err(_) => {
+            match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
+                Ok(index) => {
+                    match total_sequences(index) {
+                        Some(total_sequences) => {
+                            let bar = ProgressBar::with_draw_target(
+                                Some(total_sequences),
+                                ProgressDrawTarget::stdout(),
+                            )
+                            .with_message("BAM Records");
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                                )
+                                .unwrap()
+                                .progress_chars("##-"),
+                            );
+                            bar
+                        }
+                        None => {
+                            let bar =
+                                ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                                    .with_message("BAM Records");
+                            bar.set_style(
+                                ProgressStyle::with_template(
+                                    "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
+                                )
+                                .unwrap()
+                                // For more spinners check out the cli-spinners project:
+                                // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
+                                .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                            );
+                            bar
+                        }
+                    }
                 }
                 Err(_) => {
                     warn!("No index found for bam file: {:?}", bam_file.path);
@@ -473,8 +542,7 @@ fn _iterate_bam_file(
                     );
                     bar
                 }
-            };
-            bar
+            }
         }
     };
     if env::var("CI").is_ok() {
@@ -517,6 +585,91 @@ fn _iterate_bam_file(
     Ok(())
 }
 
+/// Merge two vectors, summing the values at each index.
+///
+/// The function takes two slices of u16 values (`vec1` and `vec2`) and returns a new vector
+/// where the values at each index are the sum of the corresponding values from both input vectors.
+/// If one vector is shorter than the other, the missing elements are assumed to be 0.
+///
+/// # Arguments
+///
+/// * `vec1` - A slice of u16 values representing the first vector.
+/// * `vec2` - A slice of u16 values representing the second vector.
+///
+/// # Returns
+///
+/// A new vector containing the sum of values at each index from both input vectors.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let vec1 = vec![1, 2, 3];
+/// let vec2 = vec![4, 5, 6];
+///
+/// let result = merge_vecs(&vec1, &vec2);
+/// assert_eq!(result, vec![5, 7, 9]);
+/// ```
+///
+/// ```
+/// let vec1 = vec![1, 2, 3];
+/// let vec2 = vec![4, 5, 6, 7];
+///
+/// let result = merge_vecs(&vec1, &vec2);
+/// assert_eq!(result, vec![5, 7, 9, 7]);
+/// ```
+fn merge_vecs(vec1: &[u16], vec2: &[u16]) -> Vec<u16> {
+    // Determine the length of the merged vector
+    let merged_len = vec1.len().max(vec2.len());
+
+    // Use zip to iterate over both vectors simultaneously, summing the values at each index
+    let merged_vec: Vec<u16> = vec1
+        .iter()
+        .chain(std::iter::repeat(&0).take(merged_len - vec1.len()))
+        .zip(vec2.iter())
+        .map(|(a, b)| a + b)
+        .collect();
+
+    merged_vec
+}
+
+/// Merge a pydict with a hashmap, and then reset the pydict to have the updated values
+fn merge_and_reset(
+    py_dict: &PyDict,
+    rust_map: FnvHashMap<String, Vec<u16>>,
+) -> PyResult<FnvHashMap<String, Vec<u16>>> {
+    // Acquire the GIL
+    Python::with_gil(|py| -> PyResult<FnvHashMap<String, Vec<u16>>> {
+        // Convert PyDict to HashMap
+        let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
+            .iter()
+            .map(|(key, value)| {
+                let key_str = key.to_string();
+                let value_list: Vec<u16> = value.extract().unwrap_or_default();
+                (key_str, value_list)
+            })
+            .collect();
+
+        // Merge values from rust_map into py_dict_map
+        let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
+            .into_iter()
+            .map(|(rust_key, rust_value)| {
+                let merged_values: Vec<u16> =
+                    merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
+                (rust_key, merged_values)
+            })
+            .collect();
+
+        // Reset values of the Python dictionary to the updated HashMap values
+        py_dict.clear();
+        for (key, values) in merged_map.clone() {
+            let py_key = key.to_object(py);
+            let py_values = values.to_object(py);
+            py_dict.set_item(py_key, py_values)?;
+        }
+        Ok(merged_map)
+    })
+}
+
 /// Iterates over a BAM file to compute Copy Number Variation (CNV) profiles for each contig.
 ///
 /// This function reads through a BAM file, filters the alignments based on mapping quality,
@@ -530,6 +683,8 @@ fn _iterate_bam_file(
 /// * `_threads` - An `Option<u8>` specifying the number of threads to use. Default is the available parallelism - a sensible number.
 /// * `log_level` - An `Option<u8>` specifying the log level. Default is 20 (INFO).
 /// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
+/// * `copy_numbers` - A python dictionary (Optional) - this will be mutated in place with the intermediate binned
+///                    Read starts per contig, so we can iteratively update them.
 ///
 /// # Returns
 ///
@@ -555,13 +710,14 @@ fn _iterate_bam_file(
 ///
 /// Note: This function is designed to be used in a Python context through PyO3 bindings.
 #[pyfunction]
-#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true), text_signature = None)]
+#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None), text_signature = None,)]
 fn iterate_bam_file(
     bam_file_path: PathBuf,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
     exclude_supplementary: Option<bool>,
+    copy_numbers: Option<&PyDict>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
@@ -585,6 +741,12 @@ fn iterate_bam_file(
     }
 
     if bam_file_path.is_dir() {
+        if copy_numbers.is_some() {
+            error!("Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.");
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+            ));
+        }
         info!("Processing directory: {:?}", &bam_file_path);
         // Iterate over all files in the directory
         for entry in fs::read_dir(&bam_file_path)? {
@@ -626,11 +788,31 @@ fn iterate_bam_file(
     } else {
         // The path is neither a directory nor a .bam file
         error!("The path is neither a directory nor a .bam file.");
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+        ));
     }
+    // If we have been given a data structure to use for the frequencies, update it here, and use the
+    // combined values to calculate CNV
+    let frequencies = if let Some(copy_numbers) = copy_numbers {
+        let frequencies = merge_and_reset(copy_numbers, frequencies).unwrap();
+        // # Update the number of reads that we have seen, to include the new and old counts
+        *valid_number_reads = frequencies
+            .values()
+            .map(|x| x.par_iter().map(|x| *x as usize).sum::<usize>())
+            .sum();
+        frequencies
+    } else {
+        frequencies
+    };
+
+    // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
     let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
     let variance = cnv_profile.values().flatten();
     let variance = calculate_variance(variance).unwrap_or(0.0);
-    let result = Python::with_gil(|py| {
+    // let variance = cnv_profile.values().flatten();
+    // let variance = calculate_variance(variance).unwrap_or(0.0);
+    let result = Python::with_gil(|py| -> PyResult<CnvResult> {
         let mut sorted_keys: Vec<_> = cnv_profile.keys().collect();
         sorted_keys.sort_by(|a, b| compare(a, b));
         let py_dict = PyDict::new(py);
@@ -710,10 +892,47 @@ mod tests {
     #[test]
     fn test_iterate_bam_file() {
         // Call the function with the temporary BAM file
-        let bam_file_path = PathBuf::from("test/test.bam");
-        let result = iterate_bam_file(bam_file_path, Some(4), Some(60), None, None)
-            .expect("Error processing BAM file");
-        info!("{:#?}", result);
+        let bam_file_path = PathBuf::from("test/NA12878_4000_test.bam");
+        let genome_length = &mut 0_usize;
+        let valid_number_reads = &mut 0_usize;
+        let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+        let contigs: &mut HashSet<String> = &mut HashSet::new();
+        _iterate_bam_file(
+            bam_file_path,
+            60,
+            genome_length,
+            valid_number_reads,
+            &mut frequencies,
+            Some(contigs),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(valid_number_reads, &mut 3702_usize);
+        // info!("{:#?}", result);
+        // Assert that the function returns a CnvBins instance
+        // assert_eq!(result.bins, vec![0, 0]);
+    }
+
+    #[test]
+    fn test_iterate_bam_file_no_supp() {
+        // Call the function with the temporary BAM file
+        let bam_file_path = PathBuf::from("test/NA12878_4000_test.bam");
+        let genome_length = &mut 0_usize;
+        let valid_number_reads = &mut 0_usize;
+        let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+        let contigs: &mut HashSet<String> = &mut HashSet::new();
+        _iterate_bam_file(
+            bam_file_path,
+            60,
+            genome_length,
+            valid_number_reads,
+            &mut frequencies,
+            Some(contigs),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(valid_number_reads, &mut 3561_usize);
+        // info!("{:#?}", result);
         // Assert that the function returns a CnvBins instance
         // assert_eq!(result.bins, vec![0, 0]);
     }
@@ -750,5 +969,119 @@ mod tests {
         let mut numbers = [42];
         let result = median(&mut numbers).unwrap();
         assert_eq!(result, 42.0);
+    }
+
+    #[test]
+    fn test_merge_vecs() {
+        // Test with equal-length vectors
+        let vec1 = vec![1, 2, 3];
+        let vec2 = vec![4, 5, 6];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![5, 7, 9]);
+
+        // Test with the first vector shorter than the second one
+        let vec1 = vec![1, 2, 3];
+        let vec2 = vec![4, 5, 6, 7];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![5, 7, 9, 7]);
+
+        // Test with an empty first vector
+        let vec1: Vec<u16> = Vec::new();
+        let vec2 = vec![4, 5, 6];
+        let result = merge_vecs(&vec1, &vec2);
+        assert_eq!(result, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn test_total_sequences_empty_index() {
+        // Create a mock BAM index for testing
+        let index = csi::Index::default();
+
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // Since the mock index has no actual data, the result should be `Some(0)`
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_total_sequences_non_empty_index() {
+        use noodles::csi::{
+            self as csi,
+            index::{reference_sequence, ReferenceSequence},
+        };
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let metadata = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            55,
+            55,
+        );
+        let reference_sequences = vec![ReferenceSequence::new(
+            Default::default(),
+            Default::default(),
+            Some(metadata),
+        )];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, Some(110));
+    }
+
+    #[test]
+    fn test_total_sequences_non_empty_index_no_metadata() {
+        use noodles::csi::{self as csi, index::ReferenceSequence};
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let reference_sequences = vec![ReferenceSequence::new(
+            Default::default(),
+            Default::default(),
+            None,
+        )];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_total_sequences_mixed_metadata() {
+        use noodles::csi::{
+            self as csi,
+            index::{reference_sequence, ReferenceSequence},
+        };
+        // Create a mock BAM index with some metadata for testing
+        let index = csi::Index::builder();
+        let metadata = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            55,
+            55,
+        );
+        let metadata2 = reference_sequence::Metadata::new(
+            bgzf::VirtualPosition::from(610),
+            bgzf::VirtualPosition::from(1597),
+            7,
+            14,
+        );
+        let reference_sequences = vec![
+            ReferenceSequence::new(Default::default(), Default::default(), Some(metadata)),
+            ReferenceSequence::new(Default::default(), Default::default(), None),
+            ReferenceSequence::new(Default::default(), Default::default(), Some(metadata2)),
+        ];
+        let index = index.set_reference_sequences(reference_sequences);
+        let index = index.build();
+        // Get the total sequences
+        let result = total_sequences(index);
+
+        // The total sequences in the mock index is 5, so the result should be `Some(5)`
+        assert_eq!(result, Some(131));
     }
 }

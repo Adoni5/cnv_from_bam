@@ -87,10 +87,10 @@ This again returns a CnvResult, but this time the CNV values are summed across a
 
 `pip install cnv_from_bam`
 
-The same `iterate_bam_file`  is available in python, accepting a path to a BAM file or a directory of BAM files, the number of threads (set to `None` to use the optimal number of threads for the machine), and the mapping quality filter.
-```python
+The same `iterate_bam_file`  is availabl
+e in python, accepting a path to a BAM file or a directory of BAM files, the number of threads (set to `None` to use the optimal number of threads for the machine), and the mapping quality filter.
 
-Example simple plot in python
+Example simple plot in python, you will need `matplotlib` an `numpy` installed (`pip install matplotlib numpy`)
 ```python
 from matplotlib import pyplot as plt
 import matplotlib as mpl
@@ -109,9 +109,27 @@ for contig, cnv in result.cnv.items():
 
 ax.set_ylim((0,8))
 ax.set_xlim((0, total))
+fig.savefig("Example_cnv_plot.png")
 ```
 Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
 ![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)
+
+### Iterative use
+It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.
+
+This is limited to parsing files one at a time, rather than by directory.
+
+
+```python
+from cnv_from_bam import iterate_bam_file
+update = {}
+bam_path = Path("path/to/bam/file.bam");
+result = iterate_bam_file(bam_path, _threads=4, mapq_filter=60, copy_numbers=update);
+
+bam_path_2 = Path("path/to/bam/file2.bam");
+result = iterate_bam_file(bam_path_2, _threads=4, mapq_filter=60, copy_numbers=update);
+# Result now contains the copy number as inferred by both BAMS
+```
 
 ## Output
 This is new in version >= 0.3. If you just want raw stdout from rust and no faffing with loggers, use v0.2.
@@ -173,6 +191,18 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
+### [v0.4.3](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.3)
+### Iterative use
+* It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.
+This is limited to parsing files one at a time, rather than by directory.
+See example above under [iterative use.](#iterative-use)
+
+* Catches bug where metadata (mapped and unmapped count) for a reference sequence in a BAI or CSI file would return None, and crash the calculation. As this
+was used to calculate the Progress bar total, just skips the offending reference sequence, returning - for both counts. May mean the progress bar can have a lower total than number of reads, but won't matter to final numbers.
+
+* Adds Cargo tests to CI
+
+
 ### v0.4.2
 * Returns the contig names naturally sorted, rather than in random order!! For example `chr1, chr2, chr3...chr22,chrM,chrX,chrY`!
 Huge, will prevent some people getting repeatedly confused about expected CNV vs. Visualised and wasting an hour debugging a non existing issue.
