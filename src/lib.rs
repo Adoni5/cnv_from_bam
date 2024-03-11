@@ -267,11 +267,14 @@ pub fn calculate_cnv(
     genome_length: usize,
     number_reads: usize,
     bins: FnvHashMap<String, Vec<u16>>,
+    cnv_params: &IterationParams,
 ) -> (FnvHashMap<String, Vec<f64>>, usize) {
     // bin_size = int(genome_length / (total_map_starts / reads_per_bin))
-    let bin_width =
-        (genome_length as f64 / (number_reads as f64 / READS_PER_BIN as f64).ceil()) as usize;
-    let chunk_size = bin_width / BIN_SIZE;
+    let bin_width = cnv_params.bin_width.unwrap_or(
+        (genome_length as f64 / (number_reads as f64 / cnv_params.num_target_reads as f64).ceil())
+            as usize,
+    );
+    let chunk_size = bin_width / cnv_params.bin_size;
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
         .values()
@@ -290,7 +293,7 @@ pub fn calculate_cnv(
                 .map(|chunk| {
                     std::convert::Into::<f64>::into(chunk.iter().sum::<u16>())
                         / (median_value as f64)
-                        * (PLOIDY as f64)
+                        * (cnv_params.ploidy as f64)
                 })
                 .collect::<Vec<f64>>();
             (k, sums)
@@ -315,6 +318,47 @@ pub struct CnvResult {
     /// Variance of the whole genome
     #[pyo3(get)]
     pub variance: f64,
+}
+
+/// Struct to hold the parameters for the CNV calculations.
+/// If bin width is SOME, the bin width for the copy number is fixed at this value for the calculation.
+pub struct IterationParams {
+    /// Number of target reads in each CNV bin when creating dynamically. Unused if bin_width is set
+    num_target_reads: usize,
+    /// Expected ploidy of the species
+    ploidy: u16,
+    /// CNV bin width, if provided hard codes the bin width.
+    bin_width: Option<usize>,
+    /// Bin size when binning mapping starts.
+    bin_size: usize,
+}
+
+impl IterationParams {
+    /// Create new parameters.
+    pub fn new(
+        num_target_reads: usize,
+        ploidy: u16,
+        bin_width: Option<usize>,
+        bin_size: usize,
+    ) -> Self {
+        IterationParams {
+            num_target_reads,
+            ploidy,
+            bin_size,
+            bin_width,
+        }
+    }
+}
+
+impl Default for IterationParams {
+    fn default() -> Self {
+        Self {
+            num_target_reads: READS_PER_BIN,
+            ploidy: PLOIDY,
+            bin_width: None,
+            bin_size: BIN_SIZE,
+        }
+    }
 }
 
 /// Get the total number of sequences from a BAM index, returning `Some(count)` if the operation
@@ -405,6 +449,7 @@ fn total_sequences(index: csi::Index) -> Option<u64> {
 /// assert!(result.is_ok());
 /// ```
 ///
+#[allow(clippy::too_many_arguments)]
 fn _iterate_bam_file(
     bam_file_path: PathBuf,
     mapq_filter: u8,
@@ -413,6 +458,7 @@ fn _iterate_bam_file(
     frequencies: &mut FnvHashMap<String, Vec<u16>>,
     contigs: Option<&mut HashSet<String>>,
     exclude_supplementary: Option<bool>,
+    cnv_params: &IterationParams,
 ) -> Result<(), PyErr> {
     let bam_file = BamFile::new(bam_file_path);
     // Open bam file
@@ -430,7 +476,7 @@ fn _iterate_bam_file(
         let contigs = contigs.unwrap();
         for (name, reference_sequence) in reference_sequences {
             contigs.insert(name.to_string());
-            let len = (usize::from(reference_sequence.length()) / BIN_SIZE) + 1;
+            let len = (usize::from(reference_sequence.length()) / cnv_params.bin_size) + 1;
             let bins = vec![0; len];
             frequencies.insert(name.to_string(), bins);
         }
@@ -564,7 +610,7 @@ fn _iterate_bam_file(
             let bins = frequencies
                 .get_mut(reference_sequence_name)
                 .expect("missing frequencies");
-            let bin = (usize::from(start) - 1) / BIN_SIZE;
+            let bin = (usize::from(start) - 1) / cnv_params.bin_size;
             bins[bin] += 1;
             _valid_number_reads += 1;
         }
@@ -685,6 +731,7 @@ fn merge_and_reset(
 /// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
 /// * `copy_numbers` - A python dictionary (Optional) - this will be mutated in place with the intermediate binned
 ///                    Read starts per contig, so we can iteratively update them.
+/// * `py_kwargs` - Keyword arguments from python to be passed through to CNV calculation. Includes `bin_width`, `bin_size`, `ploidy` and `target_reads`.
 ///
 /// # Returns
 ///
@@ -710,7 +757,7 @@ fn merge_and_reset(
 ///
 /// Note: This function is designed to be used in a Python context through PyO3 bindings.
 #[pyfunction]
-#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None), text_signature = None,)]
+#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None, **py_kwargs))]
 fn iterate_bam_file(
     bam_file_path: PathBuf,
     _threads: Option<u8>,
@@ -718,8 +765,29 @@ fn iterate_bam_file(
     log_level: Option<u8>,
     exclude_supplementary: Option<bool>,
     copy_numbers: Option<&PyDict>,
+    py_kwargs: Option<&PyDict>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
+    let bin_size: usize = py_kwargs.map_or(BIN_SIZE, |dict| {
+        dict.get_item("bin_size")
+            .map_or(BIN_SIZE, |bin_size| bin_size.unwrap().extract().unwrap())
+    });
+    let ploidy: u16 = py_kwargs.map_or(PLOIDY, |dict| {
+        dict.get_item("ploidy")
+            .map_or(PLOIDY, |ploidy| ploidy.unwrap().extract().unwrap())
+    });
+    let bin_width: Option<usize> = py_kwargs.and_then(|dict| {
+        dict.get_item("bin_width").map_or(None, |bin_width| {
+            Some(bin_width.unwrap().extract().unwrap())
+        })
+    });
+    let num_target_reads: usize = py_kwargs.map_or(READS_PER_BIN, |dict| {
+        dict.get_item("target_reads")
+            .map_or(READS_PER_BIN, |target_reads| {
+                target_reads.unwrap().extract().unwrap()
+            })
+    });
+    let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
     let genome_length = &mut 0_usize;
     let valid_number_reads = &mut 0_usize;
@@ -766,6 +834,7 @@ fn iterate_bam_file(
                     &mut frequencies,
                     Some(contigs),
                     exclude_supplementary,
+                    &cnv_params,
                 )
                 .unwrap();
             }
@@ -784,6 +853,7 @@ fn iterate_bam_file(
             &mut frequencies,
             Some(contigs),
             exclude_supplementary,
+            &cnv_params,
         )?;
     } else {
         // The path is neither a directory nor a .bam file
@@ -807,7 +877,12 @@ fn iterate_bam_file(
     };
 
     // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
-    let (cnv_profile, bin_width) = calculate_cnv(*genome_length, *valid_number_reads, frequencies);
+    let (cnv_profile, bin_width) = calculate_cnv(
+        *genome_length,
+        *valid_number_reads,
+        frequencies,
+        &cnv_params,
+    );
     let variance = cnv_profile.values().flatten();
     let variance = calculate_variance(variance).unwrap_or(0.0);
     // let variance = cnv_profile.values().flatten();
@@ -897,6 +972,7 @@ mod tests {
         let valid_number_reads = &mut 0_usize;
         let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
         let contigs: &mut HashSet<String> = &mut HashSet::new();
+
         _iterate_bam_file(
             bam_file_path,
             60,
@@ -905,6 +981,7 @@ mod tests {
             &mut frequencies,
             Some(contigs),
             Some(false),
+            &IterationParams::default(),
         )
         .unwrap();
         assert_eq!(valid_number_reads, &mut 3702_usize);
@@ -929,6 +1006,7 @@ mod tests {
             &mut frequencies,
             Some(contigs),
             Some(true),
+            &IterationParams::default(),
         )
         .unwrap();
         assert_eq!(valid_number_reads, &mut 3561_usize);
