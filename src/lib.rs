@@ -275,19 +275,23 @@ pub fn calculate_cnv(
             as usize,
     );
     let chunk_size = bin_width / cnv_params.bin_size;
-    println!("chunk_size {chunk_size}");
+    // println!("chunk_size {chunk_size}");
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
         .values()
         .flat_map(|v| v.iter().copied())
         .collect::<Vec<_>>()
         .chunks(chunk_size)
-        .map(|chunk| chunk.iter().sum::<u16>())
+        .map(|chunk: &[u16]| chunk.iter().sum::<u16>())
         .collect::<Vec<_>>();
     // info!("{bins.keys():#?}");
     let median_value: f64 = median(&mut all_values).unwrap().round();
-    let median_value = if median_value == 0.0 { 1.0 } else { 0.0 };
-    println!("meedian: {median_value}");
+    let median_value = if median_value == 0.0 {
+        1.0
+    } else {
+        median_value
+    };
+    // println!("meedian: {median_value}");
     let new_map: FnvHashMap<String, Vec<f64>> = bins
         .into_par_iter()
         .map(|(k, v)| {
@@ -767,7 +771,7 @@ fn merge_and_reset(
 #[pyfunction]
 #[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None, **py_kwargs))]
 fn iterate_bam_file(
-    bam_file_path: PathBuf,
+    bam_file_path: Option<PathBuf>,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
@@ -786,6 +790,13 @@ fn iterate_bam_file(
             ploidy.map_or(PLOIDY, |ploidy| ploidy.extract().unwrap())
         })
     });
+    let mut genome_length: usize = py_kwargs.map_or(0_usize, |dict| {
+        dict.get_item("genome_length")
+            .map_or(0_usize, |genome_length| {
+                genome_length.map_or(0_usize, |genome_length| genome_length.extract().unwrap())
+            })
+    });
+    let genome_length = &mut genome_length;
     let bin_width: Option<usize> = py_kwargs.and_then(|dict| {
         dict.get_item("bin_width").map_or(None, |bin_width| {
             bin_width.and_then(|bin_width| bin_width.extract().unwrap())
@@ -801,7 +812,7 @@ fn iterate_bam_file(
     });
     let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size);
     let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
-    let genome_length = &mut 0_usize;
+    // let genome_length = &mut 0_usize;
     let valid_number_reads = &mut 0_usize;
     let contigs: &mut HashSet<String> = &mut HashSet::new();
     let level_filter = match log_level {
@@ -819,65 +830,84 @@ fn iterate_bam_file(
     if let Ok(()) = log::set_logger(&LOGGER) {
         log::set_max_level(level_filter)
     }
+    if let Some(bam_file_path) = bam_file_path {
+        if bam_file_path.is_dir() {
+            if copy_numbers.is_some() {
+                error!("Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.");
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+                ));
+            }
+            info!("Processing directory: {:?}", &bam_file_path);
+            // Iterate over all files in the directory
+            for entry in fs::read_dir(&bam_file_path)? {
+                let entry = entry?;
+                let path = entry.path();
 
-    if bam_file_path.is_dir() {
-        if copy_numbers.is_some() {
-            error!("Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.");
+                // Check if the entry is a file and ends with .bam
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("bam") {
+                    // Process the .bam file
+                    info!("Processing BAM file: {:?}", path);
+                    // Insert your BAM file processing logic here
+                    _iterate_bam_file(
+                        path,
+                        mapq_filter,
+                        genome_length,
+                        valid_number_reads,
+                        &mut frequencies,
+                        Some(contigs),
+                        exclude_supplementary,
+                        &cnv_params,
+                    )
+                    .unwrap();
+                }
+            }
+        } else if bam_file_path.is_file()
+            && bam_file_path.extension().and_then(|s| s.to_str()).unwrap() == "bam"
+        {
+            // The path is a single .bam file
+            info!("Processing single BAM file: {:?}", &bam_file_path);
+            // Insert your BAM file processing logic here
+            _iterate_bam_file(
+                bam_file_path,
+                mapq_filter,
+                genome_length,
+                valid_number_reads,
+                &mut frequencies,
+                Some(contigs),
+                exclude_supplementary,
+                &cnv_params,
+            )?;
+        } else {
+            // The path is neither a directory nor a .bam file
+            error!("The path is neither a directory nor a .bam file.");
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
             ));
         }
-        info!("Processing directory: {:?}", &bam_file_path);
-        // Iterate over all files in the directory
-        for entry in fs::read_dir(&bam_file_path)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            // Check if the entry is a file and ends with .bam
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("bam") {
-                // Process the .bam file
-                info!("Processing BAM file: {:?}", path);
-                // Insert your BAM file processing logic here
-                _iterate_bam_file(
-                    path,
-                    mapq_filter,
-                    genome_length,
-                    valid_number_reads,
-                    &mut frequencies,
-                    Some(contigs),
-                    exclude_supplementary,
-                    &cnv_params,
-                )
-                .unwrap();
-            }
-        }
-    } else if bam_file_path.is_file()
-        && bam_file_path.extension().and_then(|s| s.to_str()).unwrap() == "bam"
-    {
-        // The path is a single .bam file
-        info!("Processing single BAM file: {:?}", &bam_file_path);
-        // Insert your BAM file processing logic here
-        _iterate_bam_file(
-            bam_file_path,
-            mapq_filter,
-            genome_length,
-            valid_number_reads,
-            &mut frequencies,
-            Some(contigs),
-            exclude_supplementary,
-            &cnv_params,
-        )?;
-    } else {
-        // The path is neither a directory nor a .bam file
-        error!("The path is neither a directory nor a .bam file.");
+    } else if copy_numbers.is_none() {
+        error!("If `bam_path` is `None` and `copy_number` is `None`, what are we even doing here");
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Please refrain from passing `copy_numbers` if `bam_path` is A DIRECTORY.",
+            "`copy_number` cannot be None if `bam_path` is set to None",
         ));
     }
     // If we have been given a data structure to use for the frequencies, update it here, and use the
     // combined values to calculate CNV
     let frequencies = if let Some(copy_numbers) = copy_numbers {
-        let frequencies = merge_and_reset(copy_numbers, frequencies).unwrap();
+        let frequencies = if frequencies.is_empty() {
+            // Convert PyDict to HashMap
+            let py_dict_map: FnvHashMap<String, Vec<u16>> = copy_numbers
+                .iter()
+                .map(|(key, value)| {
+                    let key_str = key.to_string();
+                    let value_list: Vec<u16> = value.extract().unwrap_or_default();
+                    (key_str, value_list)
+                })
+                .collect();
+            py_dict_map
+        } else {
+            merge_and_reset(copy_numbers, frequencies).unwrap()
+        };
         // # Update the number of reads that we have seen, to include the new and old counts
         *valid_number_reads = frequencies
             .values()
@@ -887,7 +917,6 @@ fn iterate_bam_file(
     } else {
         frequencies
     };
-
     // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
     let (cnv_profile, bin_width) = calculate_cnv(
         *genome_length,
