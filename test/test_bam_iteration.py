@@ -20,6 +20,30 @@ def iterate_bam(bam):
     print(len(result.cnv))
 
 
+def test_iterate_bam_fixed_bin_width(small_bam_file):
+    result = iterate_bam_file(
+        Path(small_bam_file), mapq_filter=60, log_level=20, ploidy=2, bin_width=10000
+    )
+    # Chr1 is 248Mb, which should be 2490 10kb bins
+    pprint(result.cnv["NC_000001.11"][:10])
+    assert len(result.cnv["NC_000001.11"]) == 24896, "Unexpected width of bins"
+
+
+def test_iterate_bam_update_things_fixed_bin_size(small_bam_file):
+    update = {}
+    test_sum = [(0, 0)]
+    for i in range(10):
+        result = iterate_bam_file(
+            Path(small_bam_file),
+            mapq_filter=60,
+            log_level=20,
+            copy_numbers=update,
+            bin_size=10000,
+        )
+        test_sum.append((sum(update["NC_000001.11"]), result.cnv["NC_000001.11"]))
+    pprint(test_sum)
+
+
 def test_iterate_bam_update_things(small_bam_file):
     update = {}
     test_sum = [(0, 0)]
