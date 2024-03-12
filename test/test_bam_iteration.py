@@ -20,15 +20,60 @@ def iterate_bam(bam):
     print(len(result.cnv))
 
 
-def test_iterate_bam_update_things(small_bam_file):
+def test_iterate_bam_fixed_bin_width(small_bam_file):
+    result = iterate_bam_file(
+        Path(small_bam_file), mapq_filter=60, log_level=20, ploidy=2, bin_width=10000
+    )
+    # Chr1 is 248Mb, which should be 2490 10kb bins
+    pprint(result.cnv["NC_000001.11"][:10])
+    assert len(result.cnv["NC_000001.11"]) == 24896, "Unexpected width of bins"
+
+
+def test_iterate_bam_update_things_fixed_bin_size(small_bam_file):
     update = {}
     test_sum = [(0, 0)]
     for i in range(10):
         result = iterate_bam_file(
-            Path(small_bam_file), mapq_filter=60, log_level=20, copy_numbers=update
+            Path(small_bam_file),
+            mapq_filter=60,
+            log_level=20,
+            copy_numbers=update,
+            bin_size=10000,
         )
         test_sum.append((sum(update["NC_000001.11"]), result.cnv["NC_000001.11"]))
     pprint(test_sum)
+
+
+def test_iterate_bam_update_things(small_bam_file):
+    update = {}
+    test_sum = [(0, 0)]
+    for i in range(20):
+        result = iterate_bam_file(
+            Path(small_bam_file), mapq_filter=60, log_level=20, copy_numbers=update
+        )
+        test_sum.append((sum(update["NC_000001.11"]), result.cnv["NC_000001.11"]))
+    # pprint(test_sum)
+    result = iterate_bam_file(
+        None,
+        mapq_filter=60,
+        log_level=20,
+        copy_numbers=update,
+        bin_width=1_000_000,
+        genome_length=result.genome_length,
+    )
+    assert len(result.cnv["NC_000001.11"]) == 249
+    assert (sum(result.cnv["NC_000001.11"])) == 550.0
+
+    result = iterate_bam_file(
+        None,
+        mapq_filter=60,
+        log_level=20,
+        copy_numbers=update,
+        bin_width=500_000,
+        genome_length=result.genome_length,
+    )
+    assert len(result.cnv["NC_000001.11"]) == 498
+    sum(result.cnv["NC_000001.11"]) == 11000.0
 
 
 def test_iterate_bam_file(benchmark, bam_file):
