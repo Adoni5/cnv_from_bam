@@ -234,7 +234,7 @@ fn median(numbers: &mut [u16]) -> Option<f64> {
 /// * `genome_length` - A `usize` representing the total length of the genome.
 /// * `number_reads` - A `usize` representing the total number of reads.
 /// * `bins` - A `FnvHashMap<String, Vec<u16>>` where keys are contig names and values
-///            are vectors containing read counts for each bin in that contig.
+///            are vectors containing mapped read counts for each bin in that contig.
 ///
 /// # Returns
 ///
@@ -275,6 +275,7 @@ pub fn calculate_cnv(
             as usize,
     );
     let chunk_size = bin_width / cnv_params.bin_size;
+    println!("chunk_size {chunk_size}");
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
         .values()
@@ -285,15 +286,22 @@ pub fn calculate_cnv(
         .collect::<Vec<_>>();
     // info!("{bins.keys():#?}");
     let median_value: f64 = median(&mut all_values).unwrap().round();
+    let median_value = if median_value == 0.0 { 1.0 } else { 0.0 };
+    println!("meedian: {median_value}");
     let new_map: FnvHashMap<String, Vec<f64>> = bins
         .into_par_iter()
         .map(|(k, v)| {
             let sums = v
                 .chunks(chunk_size)
                 .map(|chunk| {
-                    std::convert::Into::<f64>::into(chunk.iter().sum::<u16>())
-                        / (median_value as f64)
-                        * (cnv_params.ploidy as f64)
+                    let x = std::convert::Into::<f64>::into(chunk.iter().sum::<u16>())
+                        / median_value as f64
+                        * (cnv_params.ploidy as f64);
+                    if x.is_nan() {
+                        0.0
+                    } else {
+                        x
+                    }
                 })
                 .collect::<Vec<f64>>();
             (k, sums)
@@ -769,22 +777,26 @@ fn iterate_bam_file(
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
     let bin_size: usize = py_kwargs.map_or(BIN_SIZE, |dict| {
-        dict.get_item("bin_size")
-            .map_or(BIN_SIZE, |bin_size| bin_size.unwrap().extract().unwrap())
+        dict.get_item("bin_size").map_or(BIN_SIZE, |bin_size| {
+            bin_size.map_or(BIN_SIZE, |bin_size| bin_size.extract().unwrap())
+        })
     });
     let ploidy: u16 = py_kwargs.map_or(PLOIDY, |dict| {
-        dict.get_item("ploidy")
-            .map_or(PLOIDY, |ploidy| ploidy.unwrap().extract().unwrap())
+        dict.get_item("ploidy").map_or(PLOIDY, |ploidy| {
+            ploidy.map_or(PLOIDY, |ploidy| ploidy.extract().unwrap())
+        })
     });
     let bin_width: Option<usize> = py_kwargs.and_then(|dict| {
         dict.get_item("bin_width").map_or(None, |bin_width| {
-            Some(bin_width.unwrap().extract().unwrap())
+            bin_width.and_then(|bin_width| bin_width.extract().unwrap())
         })
     });
     let num_target_reads: usize = py_kwargs.map_or(READS_PER_BIN, |dict| {
         dict.get_item("target_reads")
             .map_or(READS_PER_BIN, |target_reads| {
-                target_reads.unwrap().extract().unwrap()
+                target_reads.map_or(READS_PER_BIN, |target_reads| {
+                    target_reads.extract().unwrap()
+                })
             })
     });
     let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size);
