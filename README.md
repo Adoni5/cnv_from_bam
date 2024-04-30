@@ -20,6 +20,48 @@ To use `cnv_from_bam` in your Rust project, add the following to your `Cargo.tom
 cnv_from_bam = "0.1.0"  # Replace with the latest version
 ```
 
+## Calculation explainer
+
+`cnv_from_bam` calculates copy number from binned mapping starts.
+Mapping starts from across the genome are binned into 1000 base wide windows.
+
+The bin width of genomic bases for calculating the Copy Number for is calculated as follows -
+
+```rust
+let bin_width = genome_length as f64 / (number_mapped_reads as f64 / 100_f64).ceil()
+let bin_width =
+    (bin_width + (cnv_params.bin_size / 2)) / cnv_params.bin_size * cnv_params.bin_size;
+```
+Which effectively bins the reads so that we have roughly 100 reads in each bin. This assumes random sampling of reads across the genome.
+The bin width is then binned to the nearest bin size for the mapped read starts, which by default is 1000 bases.
+
+We then sum the number of binned reads in this "super" bin, so if the binwidth is 10000, we sum the values of the 10 1000 base mapped start counts in this larger bin.
+We calculate the median for this new set of values.
+We then finally calculate the CNV across this set of bins as so:
+
+```rust
+let new_map: FnvHashMap<String, Vec<f64>> = bins
+    .into_par_iter()
+    .map(|(k, v)| {
+        let sums = v
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let x = std::convert::Into::<f64>::into(chunk.iter().sum::<u16>())
+                    / median_value as f64
+                    * (cnv_params.ploidy as f64);
+            })
+            .collect::<Vec<f64>>();
+        (k, sums)
+    })
+    .collect();
+```
+
+We sum the binned read counts (`bins`) int. the chunks,
+Chunk size is the `bin_width` from above divided by 1000, so it is scaled to the binned read counts from before.
+We then divide this by the median value of read counts in the bins across the genome, and multiply that by the expected ploidy.
+This gives us the Copy Number for each bin on the chromosome/contig.
+
+
 ## Usage
 
 Here's a quick example of how to use the `iterate_bam_file` function:
@@ -71,7 +113,7 @@ To analyse a directory of BAM files, use the `iterate_bam_dir` function:
 use cnv_from_bam::iterate_bam_dir;
 use std::path::PathBuf;
 let bam_path = PathBuf::from("path/to/bam_directory/");
-// Iterate over the BAM files in teh directory and calculate CNV values for the whole. Number of threads is set to 4 and mapping quality filter is set to 60.
+// Iterate over the BAM files in the directory and calculate CNV values for the whole. Number of threads is set to 4 and mapping quality filter is set to 60.
 // If number of threads is not specified, it defaults to the number of logical cores on the machine.
 let result = iterate_bam_file(bam_path, Some(4), Some(60));
 ```
@@ -114,6 +156,20 @@ fig.savefig("Example_cnv_plot.png")
 Should look something like this. Obviously the cnv data is just a dictionary of lists, so you can do whatever you want with it vis a vis matplotlib, seaborn, etc.
 ![example cnv plot](https://github.com/Adoni5/cnv_from_bam/blob/10a2b00a8832b46cacbff0e2f775a4f440844da0/example_cnv.png?raw=true)
 
+### Python keyword arguments
+It is possible to fix some of the dynamically calculated values, for comparison purposes or whatever strikes your fancy.
+
+This parameter accepts a dictionary of keyword arguments that are passed through to CNV calculation functions. These are primarily used to customize the CNV profile calculation according to specific needs. Here are the keys that can be included in `py_kwargs`:
+
+- `bin_size`: An override for the size of the bins which the BAM mapping starts are binned into. The default for this value is 1000.
+- `bin_width`: The width of the bins used to segment the genome for CNV calculations. If not given, this is dynamically calculated as described in [Calculation explainer](#calculation-explainer).
+- `genome_length`: The total length of the genome, which is used to calculate the number of bins across the genome. If not listed, this is calculated from the BAM file header by summing the lenght of each contig.
+- `ploidy`: The expected number of copies of each chromosome in a normal, non-variant condition. This is used in normalization and analysis of CNV data. The default for this is 2.
+- `target_reads`: The target number of reads per bin, which can be used to adjust the resolution of the CNV analysis based on sequencing depth. This is 100 by default.
+
+Each key is optional and has default values or a value is calculated if not specified. When these arguments are provided, they override the default or calculated parameters used in CNV calculations.
+
+
 ### Iterative use
 It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.
 
@@ -131,7 +187,7 @@ result = iterate_bam_file(bam_path_2, _threads=4, mapq_filter=60, copy_numbers=u
 # Result now contains the copy number as inferred by both BAMS
 ```
 
-## Output
+## Terminal/stdout Output
 This is new in version >= 0.3. If you just want raw stdout from rust and no faffing with loggers, use v0.2.
 ### Progress Bar
 By default, a progress bar is displayed, showing the progress of the iteration of each BAM file. To disable the progress bar, set the `CI` environment variable to `1` in your python script:
@@ -191,6 +247,15 @@ pre-commit install -t pre-commit -t post-checkout -t post-merge
 pre-commit run --all-files
 ```
 ## Changelog
+### Unreleased changes
+
+#### [v0.4.4-beta](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.4-beta.2)
+* Adds python keyword arguments which are detailed in the README, allowing the fixing of various parameters which either have sensible defaults or are dynamically calculated to close [#19](https://github.com/Adoni5/cnv_from_bam/issues/19)
+* Address an issue spotted by @mattloose where we were becoming increasingly inaccurate across the contig when we plotted by `bin_width` via element index number, as we were rounding down from the `bin_width / bin_size` to do the chunking.
+Example being bin_width 5857 was rounded down to 5 chunks (5 1000 base bins of mapped binning starts), which then means each bin was 857 * index out. [#21](https://github.com/Adoni5/cnv_from_bam/issues/21)
+* Fixes the libdeflate on linux requiring GCC >= 4.9 (pure savagery) as detailed in https://github.com/ebiggers/libdeflate/commit/a83fb24e1cb0ec6b6fd53446c941013edf055192. This meant that we were failing to cross compile for linux aarch64 on manylinux 2014, which is gcc 4.8.5, which broke CI
+
+
 ### [v0.4.3](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.3)
 ### Iterative use
 * It is possible to iteratively add bam files to a continuing count. By passing a dictionary to iterate_bam_file, the intermediate mapping start counts are kept in this dictionary.

@@ -29,7 +29,8 @@ Source = "https://github.com/adoni5/cnv_from_bam"
 dev = [
   "pytest",
   "pre-commit",
-  "pytest-benchmark[histogram]"
+  "pytest-benchmark[histogram]",
+  "numpy"
 ]
 
 [tool.pytest.ini_options]
