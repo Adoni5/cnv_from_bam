@@ -248,13 +248,14 @@ pre-commit run --all-files
 ```
 ## Changelog
 ### Unreleased changes
+* None currently
 
-#### [v0.4.4-beta](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.4-beta.2)
+### [v0.4.4](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.4)
 * Adds python keyword arguments which are detailed in the README, allowing the fixing of various parameters which either have sensible defaults or are dynamically calculated to close [#19](https://github.com/Adoni5/cnv_from_bam/issues/19)
 * Address an issue spotted by @mattloose where we were becoming increasingly inaccurate across the contig when we plotted by `bin_width` via element index number, as we were rounding down from the `bin_width / bin_size` to do the chunking.
 Example being bin_width 5857 was rounded down to 5 chunks (5 1000 base bins of mapped binning starts), which then means each bin was 857 * index out. [#21](https://github.com/Adoni5/cnv_from_bam/issues/21)
 * Fixes the libdeflate on linux requiring GCC >= 4.9 (pure savagery) as detailed in https://github.com/ebiggers/libdeflate/commit/a83fb24e1cb0ec6b6fd53446c941013edf055192. This meant that we were failing to cross compile for linux aarch64 on manylinux 2014, which is gcc 4.8.5, which broke CI
-
+* [Detailed in PR 20](https://github.com/Adoni5/cnv_from_bam/pull/20)
 
 ### [v0.4.3](https://github.com/Adoni5/cnv_from_bam/releases/tag/v0.4.3)
 ### Iterative use
@@ -266,7 +267,6 @@ See example above under [iterative use.](#iterative-use)
 was used to calculate the Progress bar total, just skips the offending reference sequence, returning - for both counts. May mean the progress bar can have a lower total than number of reads, but won't matter to final numbers.
 
 * Adds Cargo tests to CI
-
 
 ### v0.4.2
 * Returns the contig names naturally sorted, rather than in random order!! For example `chr1, chr2, chr3...chr22,chrM,chrX,chrY`!
