@@ -61,7 +61,6 @@ jobs:
             - manylinux: 2_28
               target: aarch64
 
-
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4

@@ -276,9 +276,7 @@ pub fn calculate_cnv(
     );
     let bin_width =
         (bin_width + (cnv_params.bin_size / 2)) / cnv_params.bin_size * cnv_params.bin_size;
-    println!("{bin_width}");
     let chunk_size = bin_width / cnv_params.bin_size;
-    println!("{chunk_size}");
     // println!("chunk_size {chunk_size}");
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
