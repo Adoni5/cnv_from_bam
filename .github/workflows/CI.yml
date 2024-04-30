@@ -58,7 +58,7 @@ jobs:
             # manylinux for various platforms, plus x86_64 pypy
             - manylinux: auto
               target: x86_64
-            - manylinux: off
+            - manylinux: 2_28
               target: aarch64
 
 
