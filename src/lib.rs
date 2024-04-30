@@ -274,7 +274,11 @@ pub fn calculate_cnv(
         (genome_length as f64 / (number_reads as f64 / cnv_params.num_target_reads as f64).ceil())
             as usize,
     );
+    let bin_width =
+        (bin_width + (cnv_params.bin_size / 2)) / cnv_params.bin_size * cnv_params.bin_size;
+    println!("{bin_width}");
     let chunk_size = bin_width / cnv_params.bin_size;
+    println!("{chunk_size}");
     // println!("chunk_size {chunk_size}");
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
@@ -467,7 +471,7 @@ fn _iterate_bam_file(
     mapq_filter: u8,
     genome_length: &mut usize,
     valid_number_reads: &mut usize,
-    frequencies: &mut FnvHashMap<String, Vec<u16>>,
+    binned_mapping_starts: &mut FnvHashMap<String, Vec<u16>>,
     contigs: Option<&mut HashSet<String>>,
     exclude_supplementary: Option<bool>,
     cnv_params: &IterationParams,
@@ -490,7 +494,7 @@ fn _iterate_bam_file(
             contigs.insert(name.to_string());
             let len = (usize::from(reference_sequence.length()) / cnv_params.bin_size) + 1;
             let bins = vec![0; len];
-            frequencies.insert(name.to_string(), bins);
+            binned_mapping_starts.insert(name.to_string(), bins);
         }
         // Calculate total genome length
         let _genome_length: usize = reference_sequences
@@ -619,7 +623,7 @@ fn _iterate_bam_file(
                 reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
             let start = record.alignment_start()?.expect("missing alignment start");
 
-            let bins = frequencies
+            let bins = binned_mapping_starts
                 .get_mut(reference_sequence_name)
                 .expect("missing frequencies");
             let bin = (usize::from(start) - 1) / cnv_params.bin_size;
@@ -743,7 +747,8 @@ fn merge_and_reset(
 /// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
 /// * `copy_numbers` - A python dictionary (Optional) - this will be mutated in place with the intermediate binned
 ///                    Read starts per contig, so we can iteratively update them.
-/// * `py_kwargs` - Keyword arguments from python to be passed through to CNV calculation. Includes `bin_width`, `bin_size`, `ploidy` and `target_reads`.
+/// * `py_kwargs` - Keyword arguments from python to be passed through to CNV calculation. Includes `bin_width`, `bin_size`, `genome_length`, `ploidy` and `target_reads`.
+///
 ///
 /// # Returns
 ///
@@ -811,7 +816,7 @@ fn iterate_bam_file(
             })
     });
     let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size);
-    let mut frequencies: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
+    let mut binned_mapping_starts: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
     // let genome_length = &mut 0_usize;
     let valid_number_reads = &mut 0_usize;
     let contigs: &mut HashSet<String> = &mut HashSet::new();
@@ -854,7 +859,7 @@ fn iterate_bam_file(
                         mapq_filter,
                         genome_length,
                         valid_number_reads,
-                        &mut frequencies,
+                        &mut binned_mapping_starts,
                         Some(contigs),
                         exclude_supplementary,
                         &cnv_params,
@@ -873,7 +878,7 @@ fn iterate_bam_file(
                 mapq_filter,
                 genome_length,
                 valid_number_reads,
-                &mut frequencies,
+                &mut binned_mapping_starts,
                 Some(contigs),
                 exclude_supplementary,
                 &cnv_params,
@@ -886,15 +891,15 @@ fn iterate_bam_file(
             ));
         }
     } else if copy_numbers.is_none() {
-        error!("If `bam_path` is `None` and `copy_number` is `None`, what are we even doing here");
+        error!("If `bam_path` is `None` and `copy_number` is `None`, what are we even doing here?");
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "`copy_number` cannot be None if `bam_path` is set to None",
         ));
     }
     // If we have been given a data structure to use for the frequencies, update it here, and use the
     // combined values to calculate CNV
-    let frequencies = if let Some(copy_numbers) = copy_numbers {
-        let frequencies = if frequencies.is_empty() {
+    let binned_mapping_starts = if let Some(copy_numbers) = copy_numbers {
+        let frequencies = if binned_mapping_starts.is_empty() {
             // Convert PyDict to HashMap
             let py_dict_map: FnvHashMap<String, Vec<u16>> = copy_numbers
                 .iter()
@@ -906,7 +911,7 @@ fn iterate_bam_file(
                 .collect();
             py_dict_map
         } else {
-            merge_and_reset(copy_numbers, frequencies).unwrap()
+            merge_and_reset(copy_numbers, binned_mapping_starts).unwrap()
         };
         // # Update the number of reads that we have seen, to include the new and old counts
         *valid_number_reads = frequencies
@@ -915,13 +920,13 @@ fn iterate_bam_file(
             .sum();
         frequencies
     } else {
-        frequencies
+        binned_mapping_starts
     };
     // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
     let (cnv_profile, bin_width) = calculate_cnv(
         *genome_length,
         *valid_number_reads,
-        frequencies,
+        binned_mapping_starts,
         &cnv_params,
     );
     let variance = cnv_profile.values().flatten();
