@@ -49,24 +49,29 @@
 //! ---
 //!
 
+use bstr::ByteSlice;
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-
 use log::LevelFilter;
 use log::{error, info, warn};
-use log::{Level, Metadata, Record};
+use log::{Level, Metadata, Record as LogRecord};
 use natord::compare;
-use noodles::bam::bai;
-use noodles::{
-    bam, csi,
-    sam::{self, record::MappingQuality},
-};
-use noodles_bgzf as bgzf;
+use noodles::bam::io::Reader as BamReader;
+use noodles::bam::Record as BamRecord;
+use noodles::bgzf::io::MultithreadedReader;
+use noodles::csi;
+use noodles::csi::binning_index::ReferenceSequence;
+use noodles::csi::io::Reader as CsiReader;
+use noodles::sam;
+use noodles::sam::alignment::record::mapping_quality::MappingQuality;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
+use pyo3::PyTraverseError;
+use pyo3::PyVisit;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -99,7 +104,7 @@ impl log::Log for SimpleLogger {
         metadata.level() <= Level::Info
     }
 
-    fn log(&self, record: &Record) {
+    fn log(&self, record: &LogRecord) {
         if self.enabled(record.metadata()) {
             println!(
                 "{} ({}) - {} - {}",
@@ -266,7 +271,7 @@ fn median(numbers: &mut [u16]) -> Option<f64> {
 pub fn calculate_cnv(
     genome_length: usize,
     number_reads: usize,
-    bins: FnvHashMap<String, Vec<u16>>,
+    bins: &FnvHashMap<String, Vec<u16>>,
     cnv_params: &IterationParams,
 ) -> (FnvHashMap<String, Vec<f64>>, usize) {
     // bin_size = int(genome_length / (total_map_starts / reads_per_bin))
@@ -277,7 +282,6 @@ pub fn calculate_cnv(
     let bin_width =
         (bin_width + (cnv_params.bin_size / 2)) / cnv_params.bin_size * cnv_params.bin_size;
     let chunk_size = bin_width / cnv_params.bin_size;
-    // println!("chunk_size {chunk_size}");
     let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
     let mut all_values: Vec<u16> = bins
         .values()
@@ -286,16 +290,14 @@ pub fn calculate_cnv(
         .chunks(chunk_size)
         .map(|chunk: &[u16]| chunk.iter().sum::<u16>())
         .collect::<Vec<_>>();
-    // info!("{bins.keys():#?}");
     let median_value: f64 = median(&mut all_values).unwrap().round();
     let median_value = if median_value == 0.0 {
         1.0
     } else {
         median_value
     };
-    // println!("meedian: {median_value}");
     let new_map: FnvHashMap<String, Vec<f64>> = bins
-        .into_par_iter()
+        .par_iter()
         .map(|(k, v)| {
             let sums = v
                 .chunks(chunk_size)
@@ -310,13 +312,13 @@ pub fn calculate_cnv(
                     }
                 })
                 .collect::<Vec<f64>>();
-            (k, sums)
+            (k.clone(), sums)
         })
         .collect();
     (new_map, bin_width)
 }
 
-/// Results struct for python
+/// Results struct for python with proper cleanup
 #[pyclass]
 #[derive(Debug)]
 pub struct CnvResult {
@@ -332,6 +334,69 @@ pub struct CnvResult {
     /// Variance of the whole genome
     #[pyo3(get)]
     pub variance: f64,
+    /// Number of reads processed in this file
+    #[pyo3(get)]
+    pub reads_in_file: usize,
+    /// Internal reference to binned read counts for proper merging
+    #[pyo3(get)]
+    pub binned_reads: Option<PyObject>,
+    /// Internal reference to calculated copy numbers for persistence
+    #[pyo3(get)]
+    pub copy_numbers: Option<PyObject>,
+}
+
+#[pymethods]
+impl CnvResult {
+    /// Traverse all Python objects in the struct to ensure proper garbage collection.
+    /// This is called by Python's garbage collector to detect reference cycles.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // Visit all Python objects to ensure proper GC
+        visit.call(&self.cnv)?;
+        if let Some(ref binned_reads) = self.binned_reads {
+            visit.call(binned_reads)?;
+        }
+        if let Some(ref copy_numbers) = self.copy_numbers {
+            visit.call(copy_numbers)?;
+        }
+        Ok(())
+    }
+
+    /// Clear all Python objects in the struct.
+    /// This is called by Python's garbage collector to break reference cycles.
+    fn __clear__(&mut self) {
+        Python::with_gil(|py| {
+            // Create empty PyDict to replace cnv
+            let empty_dict = PyDict::new(py);
+            self.cnv = empty_dict.into();
+
+            // Clear binned_reads
+            if let Some(ref mut binned_reads) = self.binned_reads {
+                if let Ok(dict) = binned_reads.bind(py).downcast::<PyDict>() {
+                    dict.clear(); // Clear the dictionary
+                }
+            }
+            self.binned_reads = None;
+
+            // Clear copy_numbers
+            if let Some(ref mut copy_numbers) = self.copy_numbers {
+                if let Ok(dict) = copy_numbers.bind(py).downcast::<PyDict>() {
+                    dict.clear(); // Clear the dictionary
+                }
+            }
+            self.copy_numbers = None;
+        });
+    }
+
+    /// Deallocate the struct and clean up Python objects.
+    /// This is called when the Python object is garbage collected.
+    fn __dealloc__(&mut self) {
+        self.__clear__();
+    }
+
+    /// Explicit cleanup method that can be called from Python
+    fn cleanup(&mut self) {
+        self.__clear__();
+    }
 }
 
 /// Struct to hold the parameters for the CNV calculations.
@@ -345,6 +410,8 @@ pub struct IterationParams {
     bin_width: Option<usize>,
     /// Bin size when binning mapping starts.
     bin_size: usize,
+    /// Number of threads to use for parallel operations. If None, uses available parallelism.
+    num_threads: Option<usize>,
 }
 
 impl IterationParams {
@@ -354,12 +421,14 @@ impl IterationParams {
         ploidy: u16,
         bin_width: Option<usize>,
         bin_size: usize,
+        num_threads: Option<usize>,
     ) -> Self {
         IterationParams {
             num_target_reads,
             ploidy,
             bin_size,
             bin_width,
+            num_threads,
         }
     }
 }
@@ -371,6 +440,7 @@ impl Default for IterationParams {
             ploidy: PLOIDY,
             bin_width: None,
             bin_size: BIN_SIZE,
+            num_threads: None,
         }
     }
 }
@@ -475,14 +545,12 @@ fn _iterate_bam_file(
     cnv_params: &IterationParams,
 ) -> Result<(), PyErr> {
     let bam_file = BamFile::new(bam_file_path);
-    // Open bam file
-
     let file = File::open(&bam_file.path)?;
 
     let worker_count = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-    let decoder = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+    let decoder = MultithreadedReader::with_worker_count(worker_count, file);
 
-    let mut bam_reader = bam::Reader::from(decoder);
+    let mut bam_reader = BamReader::from(decoder);
     let header = bam_reader.read_header()?;
     let reference_sequences = header.reference_sequences();
 
@@ -512,13 +580,11 @@ fn _iterate_bam_file(
         }
     }
     // Get total number of reads, mapped and unmapped
-    // horrendous repetitive, dirty match to try a .csi index, then a .bai index, then no index
     let bar = match File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
-        .map(csi::Reader::new)
+        .map(CsiReader::new)
     {
         Ok(mut index) => {
             let index = index.read_index().unwrap();
-
             match total_sequences(index) {
                 Some(total_sequences) => {
                     let bar = ProgressBar::with_draw_target(
@@ -543,52 +609,30 @@ fn _iterate_bam_file(
                             "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
                         )
                         .unwrap()
-                        // For more spinners check out the cli-spinners project:
-                        // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
                         .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
                     );
                     bar
                 }
             }
         }
-        Err(_) => {
-            match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
-                Ok(index) => {
-                    match total_sequences(index) {
-                        Some(total_sequences) => {
-                            let bar = ProgressBar::with_draw_target(
-                                Some(total_sequences),
-                                ProgressDrawTarget::stdout(),
-                            )
-                            .with_message("BAM Records");
-                            bar.set_style(
-                                ProgressStyle::with_template(
-                                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-                                )
-                                .unwrap()
-                                .progress_chars("##-"),
-                            );
-                            bar
-                        }
-                        None => {
-                            let bar =
-                                ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
-                                    .with_message("BAM Records");
-                            bar.set_style(
-                                ProgressStyle::with_template(
-                                    "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
-                                )
-                                .unwrap()
-                                // For more spinners check out the cli-spinners project:
-                                // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
-                                .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
-                            );
-                            bar
-                        }
-                    }
+        Err(_) => match csi::fs::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
+            Ok(index) => match total_sequences(index) {
+                Some(total_sequences) => {
+                    let bar = ProgressBar::with_draw_target(
+                        Some(total_sequences),
+                        ProgressDrawTarget::stdout(),
+                    )
+                    .with_message("BAM Records");
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                        )
+                        .unwrap()
+                        .progress_chars("##-"),
+                    );
+                    bar
                 }
-                Err(_) => {
-                    warn!("No index found for bam file: {:?}", bam_file.path);
+                None => {
                     let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
                         .with_message("BAM Records");
                     bar.set_style(
@@ -596,14 +640,23 @@ fn _iterate_bam_file(
                             "[{elapsed_precise}] {spinner} {pos:>7} {msg}",
                         )
                         .unwrap()
-                        // For more spinners check out the cli-spinners project:
-                        // https://github.com/sindresorhus/cli-spinners/blob/master/spinners.json
                         .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
                     );
                     bar
                 }
+            },
+            Err(_) => {
+                warn!("No index found for bam file: {:?}", bam_file.path);
+                let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout())
+                    .with_message("BAM Records");
+                bar.set_style(
+                    ProgressStyle::with_template("[{elapsed_precise}] {spinner} {pos:>7} {msg}")
+                        .unwrap()
+                        .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]),
+                );
+                bar
             }
-        }
+        },
     };
     if env::var("CI").is_ok() {
         bar.set_draw_target(ProgressDrawTarget::hidden())
@@ -613,13 +666,21 @@ fn _iterate_bam_file(
     let mut _valid_number_reads: usize = 0;
 
     // Allocate record
-    let mut record = bam::lazy::Record::default();
+    let mut record = BamRecord::default();
 
-    while (bam_reader.read_lazy_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
+    while (bam_reader.read_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
         if filter(&record, mapq_filter, exclude_supplementary.unwrap_or(false)) {
-            let reference_sequence_name =
-                reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
-            let start = record.alignment_start()?.expect("missing alignment start");
+            let reference_sequence_name = match reference_sequence_name(&record, &header) {
+                Ok(Some(name)) => name,
+                Ok(None) => continue,
+                Err(e) => return Err(PyErr::new::<PyRuntimeError, _>(e.to_string())),
+            };
+
+            let start = match record.alignment_start() {
+                Some(Ok(start)) => start,
+                Some(Err(e)) => return Err(PyErr::new::<PyRuntimeError, _>(e.to_string())),
+                None => continue,
+            };
 
             let bins = binned_mapping_starts
                 .get_mut(reference_sequence_name)
@@ -694,40 +755,35 @@ fn merge_vecs(vec1: &[u16], vec2: &[u16]) -> Vec<u16> {
 
 /// Merge a pydict with a hashmap, and then reset the pydict to have the updated values
 fn merge_and_reset(
-    py_dict: &PyDict,
+    py_dict: &Bound<'_, PyDict>,
     rust_map: FnvHashMap<String, Vec<u16>>,
 ) -> PyResult<FnvHashMap<String, Vec<u16>>> {
-    // Acquire the GIL
-    Python::with_gil(|py| -> PyResult<FnvHashMap<String, Vec<u16>>> {
-        // Convert PyDict to HashMap
-        let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
-            .iter()
-            .map(|(key, value)| {
-                let key_str = key.to_string();
-                let value_list: Vec<u16> = value.extract().unwrap_or_default();
-                (key_str, value_list)
-            })
-            .collect();
+    // Convert PyDict to HashMap
+    let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
+        .iter()
+        .map(|(key, value)| {
+            let key_str = key.extract::<String>().unwrap_or_default();
+            let value_list: Vec<u16> = value.extract().unwrap_or_default();
+            (key_str, value_list)
+        })
+        .collect();
 
-        // Merge values from rust_map into py_dict_map
-        let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
-            .into_iter()
-            .map(|(rust_key, rust_value)| {
-                let merged_values: Vec<u16> =
-                    merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
-                (rust_key, merged_values)
-            })
-            .collect();
+    // Merge values from rust_map into py_dict_map
+    let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
+        .into_iter()
+        .map(|(rust_key, rust_value)| {
+            let merged_values: Vec<u16> =
+                merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
+            (rust_key, merged_values)
+        })
+        .collect();
 
-        // Reset values of the Python dictionary to the updated HashMap values
-        py_dict.clear();
-        for (key, values) in merged_map.clone() {
-            let py_key = key.to_object(py);
-            let py_values = values.to_object(py);
-            py_dict.set_item(py_key, py_values)?;
-        }
-        Ok(merged_map)
-    })
+    // Reset values of the Python dictionary to the updated HashMap values
+    py_dict.clear();
+    for (key, values) in merged_map.clone() {
+        py_dict.set_item(key, values)?;
+    }
+    Ok(merged_map)
 }
 
 /// Iterates over a BAM file to compute Copy Number Variation (CNV) profiles for each contig.
@@ -740,72 +796,61 @@ fn merge_and_reset(
 /// * `bam_file_path` - A `PathBuf` specifying the path to the BAM file.
 /// * `mapq_filter` - An `Option<u8>` specifying the minimum mapping quality to consider.
 ///                   Alignments with a mapping quality below this value are ignored. Default is 60.
-/// * `_threads` - An `Option<u8>` specifying the number of threads to use. Default is the available parallelism - a sensible number.
+/// * `_threads` - An `Option<u8>` specifying the number of threads to use. Default is the available parallelism.
 /// * `log_level` - An `Option<u8>` specifying the log level. Default is 20 (INFO).
 /// * `exclude_supplementary` - An `Option<bool>` specifying whether to filter out supplementary alignments. Default is true.
 /// * `copy_numbers` - A python dictionary (Optional) - this will be mutated in place with the intermediate binned
 ///                    Read starts per contig, so we can iteratively update them.
-/// * `py_kwargs` - Keyword arguments from python to be passed through to CNV calculation. Includes `bin_width`, `bin_size`, `genome_length`, `ploidy` and `target_reads`.
-///
+/// * `py_kwargs` - Keyword arguments from python to be passed through to CNV calculation.
 ///
 /// # Returns
 ///
 /// A `PyResult<CnvResult>` containing the CNV profiles and additional information about the analysis.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use std::path::PathBuf;
-/// use cnv_from_bam::iterate_bam_file;  // Replace with the actual crate name
-///
-/// // Example usage of iterate_bam_file
-/// let bam_path = PathBuf::from("path/to/bam/file.bam");
-/// let result = iterate_bam_file(bam_path, Some(60));
-/// match result {
-///     Ok(cnv_result) => {
-///         // Process the CNV results
-///         println!("Bin width: {}", cnv_result.bin_width);
-///     },
-///     Err(e) => println!("Error: {:?}", e),
-/// }
-/// ```
-///
-/// Note: This function is designed to be used in a Python context through PyO3 bindings.
+#[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (bam_file_path, _threads=None, mapq_filter=60, log_level=None, exclude_supplementary=true, copy_numbers=None, **py_kwargs))]
+#[pyo3(signature = (
+    bam_file_path = None,
+    _threads = None,
+    mapq_filter = 60,
+    log_level = None,
+    exclude_supplementary = true,
+    copy_numbers = None,
+    **py_kwargs
+))]
 fn iterate_bam_file(
+    _py: Python<'_>,
     bam_file_path: Option<PathBuf>,
     _threads: Option<u8>,
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
     exclude_supplementary: Option<bool>,
-    copy_numbers: Option<&PyDict>,
-    py_kwargs: Option<&PyDict>,
+    copy_numbers: Option<Bound<'_, PyDict>>,
+    py_kwargs: Option<Bound<'_, PyDict>>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
-    let bin_size: usize = py_kwargs.map_or(BIN_SIZE, |dict| {
+    let bin_size: usize = py_kwargs.as_ref().map_or(BIN_SIZE, |dict| {
         dict.get_item("bin_size").map_or(BIN_SIZE, |bin_size| {
             bin_size.map_or(BIN_SIZE, |bin_size| bin_size.extract().unwrap())
         })
     });
-    let ploidy: u16 = py_kwargs.map_or(PLOIDY, |dict| {
+    let ploidy: u16 = py_kwargs.as_ref().map_or(PLOIDY, |dict| {
         dict.get_item("ploidy").map_or(PLOIDY, |ploidy| {
             ploidy.map_or(PLOIDY, |ploidy| ploidy.extract().unwrap())
         })
     });
-    let mut genome_length: usize = py_kwargs.map_or(0_usize, |dict| {
+    let mut genome_length: usize = py_kwargs.as_ref().map_or(0_usize, |dict| {
         dict.get_item("genome_length")
             .map_or(0_usize, |genome_length| {
                 genome_length.map_or(0_usize, |genome_length| genome_length.extract().unwrap())
             })
     });
     let genome_length = &mut genome_length;
-    let bin_width: Option<usize> = py_kwargs.and_then(|dict| {
+    let bin_width: Option<usize> = py_kwargs.as_ref().and_then(|dict| {
         dict.get_item("bin_width").map_or(None, |bin_width| {
-            bin_width.and_then(|bin_width| bin_width.extract().unwrap())
+            bin_width.and_then(|bin_width| bin_width.extract().ok())
         })
     });
-    let num_target_reads: usize = py_kwargs.map_or(READS_PER_BIN, |dict| {
+    let num_target_reads: usize = py_kwargs.as_ref().map_or(READS_PER_BIN, |dict| {
         dict.get_item("target_reads")
             .map_or(READS_PER_BIN, |target_reads| {
                 target_reads.map_or(READS_PER_BIN, |target_reads| {
@@ -813,9 +858,8 @@ fn iterate_bam_file(
                 })
             })
     });
-    let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size);
+    let cnv_params = IterationParams::new(num_target_reads, ploidy, bin_width, bin_size, None);
     let mut binned_mapping_starts: FnvHashMap<String, Vec<u16>> = FnvHashMap::default();
-    // let genome_length = &mut 0_usize;
     let valid_number_reads = &mut 0_usize;
     let contigs: &mut HashSet<String> = &mut HashSet::new();
     let level_filter = match log_level {
@@ -894,37 +938,36 @@ fn iterate_bam_file(
             "`copy_number` cannot be None if `bam_path` is set to None",
         ));
     }
-    // If we have been given a data structure to use for the frequencies, update it here, and use the
-    // combined values to calculate CNV
+    // If we have been given a data structure to use for the frequencies, update it here
     let binned_mapping_starts = if let Some(copy_numbers) = copy_numbers {
         let frequencies = if binned_mapping_starts.is_empty() {
-            // Convert PyDict to HashMap
             let py_dict_map: FnvHashMap<String, Vec<u16>> = copy_numbers
                 .iter()
                 .map(|(key, value)| {
-                    let key_str = key.to_string();
+                    let key_str = key.extract::<String>().unwrap_or_default();
                     let value_list: Vec<u16> = value.extract().unwrap_or_default();
                     (key_str, value_list)
                 })
                 .collect();
             py_dict_map
         } else {
-            merge_and_reset(copy_numbers, binned_mapping_starts).unwrap()
+            merge_and_reset(&copy_numbers, binned_mapping_starts)?
         };
-        // # Update the number of reads that we have seen, to include the new and old counts
-        *valid_number_reads = frequencies
+        // Update total reads based on accumulated frequencies
+        let new_reads: usize = frequencies
             .values()
             .map(|x| x.par_iter().map(|x| *x as usize).sum::<usize>())
             .sum();
+        *valid_number_reads += new_reads;
         frequencies
     } else {
         binned_mapping_starts
     };
     // println!("{:#?}", frequencies["NC_000001.11"].iter().sum::<u16>());
-    let (cnv_profile, bin_width) = calculate_cnv(
+    let (cnv_profile, final_bin_width) = calculate_cnv(
         *genome_length,
         *valid_number_reads,
-        binned_mapping_starts,
+        &binned_mapping_starts,
         &cnv_params,
     );
     let variance = cnv_profile.values().flatten();
@@ -932,19 +975,73 @@ fn iterate_bam_file(
     // let variance = cnv_profile.values().flatten();
     // let variance = calculate_variance(variance).unwrap_or(0.0);
     let result = Python::with_gil(|py| -> PyResult<CnvResult> {
-        let mut sorted_keys: Vec<_> = cnv_profile.keys().collect();
-        sorted_keys.sort_by(|a, b| compare(a, b));
+        let mut sorted_keys = Vec::with_capacity(cnv_profile.len());
+        sorted_keys.extend(cnv_profile.keys());
+
+        // Create a local thread pool for sorting
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(cnv_params.num_threads.unwrap_or_else(|| {
+                thread::available_parallelism()
+                    .unwrap_or(NonZeroUsize::MIN)
+                    .get()
+            }))
+            .build()
+            .unwrap();
+
+        pool.install(|| {
+            sorted_keys.par_sort_by(|a, b| compare(a, b));
+        });
+        sorted_keys.shrink_to_fit();
+
+        // Drop the pool explicitly
+        drop(pool);
+
         let py_dict = PyDict::new(py);
-        for key in sorted_keys {
-            let value = cnv_profile.get(key).unwrap();
-            py_dict.set_item(key, value)?;
+
+        // Process in chunks to avoid holding too much memory
+        for chunk in sorted_keys.chunks(1000) {
+            for &key in chunk {
+                if let Some(value) = cnv_profile.get(key) {
+                    // Create a new Python list for each value to break reference cycles
+                    let py_list = PyList::empty(py);
+                    for &v in value {
+                        py_list.append(v)?;
+                    }
+                    py_dict.set_item(key, py_list)?;
+                }
+            }
+        }
+
+        // Clear the sorted keys as soon as we're done with them
+        drop(sorted_keys);
+
+        // Create dictionaries for binned reads and copy numbers
+        let binned_reads_dict = PyDict::new(py);
+        for (key, value) in binned_mapping_starts.iter() {
+            let py_list = PyList::empty(py);
+            for &v in value {
+                py_list.append(v)?;
+            }
+            binned_reads_dict.set_item(key, py_list)?;
+        }
+
+        let copy_numbers_dict = PyDict::new(py);
+        for (key, value) in cnv_profile.iter() {
+            let py_list = PyList::empty(py);
+            for &v in value {
+                py_list.append(v)?;
+            }
+            copy_numbers_dict.set_item(key, py_list)?;
         }
 
         let result = CnvResult {
             cnv: py_dict.into(),
-            bin_width,
+            bin_width: final_bin_width,
             genome_length: *genome_length,
             variance,
+            reads_in_file: *valid_number_reads,
+            binned_reads: Some(binned_reads_dict.into()),
+            copy_numbers: Some(copy_numbers_dict.into()),
         };
         Ok(result)
     });
@@ -952,7 +1049,7 @@ fn iterate_bam_file(
 }
 
 /// Filters a BAM record based on mapping quality and flags.
-fn filter(record: &bam::lazy::Record, mapping_quality: u8, exclude_supplementary: bool) -> bool {
+fn filter(record: &BamRecord, mapping_quality: u8, exclude_supplementary: bool) -> bool {
     let min_mapping_quality: MappingQuality = match MappingQuality::new(mapping_quality) {
         Some(mapq) => mapq,
         None => unreachable!(),
@@ -975,25 +1072,31 @@ fn filter(record: &bam::lazy::Record, mapping_quality: u8, exclude_supplementary
 
 /// Get the ref seq name
 fn reference_sequence_name<'a>(
-    record: &bam::lazy::Record,
+    record: &BamRecord,
     header: &'a sam::Header,
 ) -> io::Result<Option<&'a str>> {
-    record
-        .reference_sequence_id()?
-        .map(|id| {
-            header
-                .reference_sequences()
-                .get_index(id)
-                .map(|(name, _)| name.as_ref())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid reference sequence ID")
-                })
+    let id = match record.reference_sequence_id() {
+        Some(Ok(id)) => id,
+        Some(Err(e)) => return Err(e),
+        None => return Ok(None),
+    };
+
+    header
+        .reference_sequences()
+        .get_index(id)
+        .map(|(name, _)| {
+            name.to_str().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid reference sequence name",
+                )
+            })
         })
         .transpose()
 }
 /// A Python module implemented in Rust.
 #[pymodule]
-fn cnv_from_bam(_py: Python, m: &PyModule) -> PyResult<()> {
+fn cnv_from_bam(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let r = EXIT.clone();
     ctrlc::set_handler(move || {
         r.store(true, Ordering::SeqCst);
