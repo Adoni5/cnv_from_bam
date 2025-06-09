@@ -52,24 +52,27 @@
 use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use bstr::ByteSlice;
 use log::LevelFilter;
-use log::{error, info, warn};
 use log::{Level, Metadata, Record};
+use log::{error, info, warn};
 use natord::compare;
 use noodles::bam::bai;
+use noodles::bgzf::io::MultithreadedReader;
+use noodles::csi::binning_index::{Index, ReferenceSequence};
 use noodles::{
     bam, csi,
-    sam::{self, record::MappingQuality},
+    sam::{self, alignment::record::mapping_quality::MappingQuality},
 };
-use noodles_bgzf as bgzf;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::PyDictMethods;
+use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, error::Error, fs, fs::File, io, num::NonZeroUsize, path::PathBuf, thread};
 
 /// Number of reads expected in given bin width on the genome
@@ -303,11 +306,7 @@ pub fn calculate_cnv(
                     let x = std::convert::Into::<f64>::into(chunk.iter().sum::<u16>())
                         / median_value as f64
                         * (cnv_params.ploidy as f64);
-                    if x.is_nan() {
-                        0.0
-                    } else {
-                        x
-                    }
+                    if x.is_nan() { 0.0 } else { x }
                 })
                 .collect::<Vec<f64>>();
             (k, sums)
@@ -406,7 +405,10 @@ impl Default for IterationParams {
 /// // The total sequences in the mock index is 5, so the result should be `Some(5)`
 /// assert_eq!(result, Some(5));
 /// ```
-fn total_sequences(index: csi::Index) -> Option<u64> {
+fn total_sequences<I>(index: Index<I>) -> Option<u64>
+where
+    I: noodles::csi::binning_index::index::reference_sequence::Index,
+{
     let (mut total_mapped, total_unmapped): (u64, u64) = index
         .reference_sequences()
         .iter()
@@ -480,9 +482,9 @@ fn _iterate_bam_file(
     let file = File::open(&bam_file.path)?;
 
     let worker_count = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-    let decoder = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+    let decoder = MultithreadedReader::with_worker_count(worker_count, file);
 
-    let mut bam_reader = bam::Reader::from(decoder);
+    let mut bam_reader = bam::io::Reader::from(decoder);
     let header = bam_reader.read_header()?;
     let reference_sequences = header.reference_sequences();
 
@@ -514,7 +516,7 @@ fn _iterate_bam_file(
     // Get total number of reads, mapped and unmapped
     // horrendous repetitive, dirty match to try a .csi index, then a .bai index, then no index
     let bar = match File::open(format!("{}.csi", bam_file.path.to_str().unwrap()))
-        .map(csi::Reader::new)
+        .map(csi::io::Reader::new)
     {
         Ok(mut index) => {
             let index = index.read_index().unwrap();
@@ -552,7 +554,7 @@ fn _iterate_bam_file(
             }
         }
         Err(_) => {
-            match bai::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
+            match bai::fs::read(format!("{}.bai", bam_file.path.to_str().unwrap())) {
                 Ok(index) => {
                     match total_sequences(index) {
                         Some(total_sequences) => {
@@ -613,13 +615,13 @@ fn _iterate_bam_file(
     let mut _valid_number_reads: usize = 0;
 
     // Allocate record
-    let mut record = bam::lazy::Record::default();
+    let mut record = bam::Record::default();
 
-    while (bam_reader.read_lazy_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
+    while (bam_reader.read_record(&mut record)? != 0) & !EXIT.load(Ordering::SeqCst) {
         if filter(&record, mapq_filter, exclude_supplementary.unwrap_or(false)) {
             let reference_sequence_name =
                 reference_sequence_name(&record, &header)?.expect("missing reference sequence ID");
-            let start = record.alignment_start()?.expect("missing alignment start");
+            let start = record.alignment_start().expect("missing alignment start")?;
 
             let bins = binned_mapping_starts
                 .get_mut(reference_sequence_name)
@@ -694,40 +696,36 @@ fn merge_vecs(vec1: &[u16], vec2: &[u16]) -> Vec<u16> {
 
 /// Merge a pydict with a hashmap, and then reset the pydict to have the updated values
 fn merge_and_reset(
-    py_dict: &PyDict,
+    py_dict: &Bound<'_, PyDict>,
     rust_map: FnvHashMap<String, Vec<u16>>,
 ) -> PyResult<FnvHashMap<String, Vec<u16>>> {
     // Acquire the GIL
-    Python::with_gil(|py| -> PyResult<FnvHashMap<String, Vec<u16>>> {
-        // Convert PyDict to HashMap
-        let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
-            .iter()
-            .map(|(key, value)| {
-                let key_str = key.to_string();
-                let value_list: Vec<u16> = value.extract().unwrap_or_default();
-                (key_str, value_list)
-            })
-            .collect();
+    // Convert PyDict to HashMap
+    let py_dict_map: FnvHashMap<String, Vec<u16>> = py_dict
+        .iter()
+        .map(|(key, value)| {
+            let key_str = key.to_string();
+            let value_list: Vec<u16> = value.extract().unwrap_or_default();
+            (key_str, value_list)
+        })
+        .collect();
 
-        // Merge values from rust_map into py_dict_map
-        let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
-            .into_iter()
-            .map(|(rust_key, rust_value)| {
-                let merged_values: Vec<u16> =
-                    merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
-                (rust_key, merged_values)
-            })
-            .collect();
+    // Merge values from rust_map into py_dict_map
+    let merged_map: FnvHashMap<String, Vec<u16>> = rust_map
+        .into_iter()
+        .map(|(rust_key, rust_value)| {
+            let merged_values: Vec<u16> =
+                merge_vecs(py_dict_map.get(&rust_key).unwrap_or(&vec![]), &rust_value);
+            (rust_key, merged_values)
+        })
+        .collect();
 
-        // Reset values of the Python dictionary to the updated HashMap values
-        py_dict.clear();
-        for (key, values) in merged_map.clone() {
-            let py_key = key.to_object(py);
-            let py_values = values.to_object(py);
-            py_dict.set_item(py_key, py_values)?;
-        }
-        Ok(merged_map)
-    })
+    // Reset values of the Python dictionary to the updated HashMap values
+    py_dict.clear();
+    for (key, values) in merged_map.clone() {
+        py_dict.set_item(key, values)?;
+    }
+    Ok(merged_map)
 }
 
 /// Iterates over a BAM file to compute Copy Number Variation (CNV) profiles for each contig.
@@ -779,33 +777,33 @@ fn iterate_bam_file(
     mapq_filter: Option<u8>,
     log_level: Option<u8>,
     exclude_supplementary: Option<bool>,
-    copy_numbers: Option<&PyDict>,
-    py_kwargs: Option<&PyDict>,
+    copy_numbers: Option<Bound<'_, PyDict>>,
+    py_kwargs: Option<Bound<'_, PyDict>>,
 ) -> PyResult<CnvResult> {
     let mapq_filter = mapq_filter.unwrap_or(60);
-    let bin_size: usize = py_kwargs.map_or(BIN_SIZE, |dict| {
+    let bin_size: usize = py_kwargs.as_ref().map_or(BIN_SIZE, |dict| {
         dict.get_item("bin_size").map_or(BIN_SIZE, |bin_size| {
             bin_size.map_or(BIN_SIZE, |bin_size| bin_size.extract().unwrap())
         })
     });
-    let ploidy: u16 = py_kwargs.map_or(PLOIDY, |dict| {
+    let ploidy: u16 = py_kwargs.as_ref().map_or(PLOIDY, |dict| {
         dict.get_item("ploidy").map_or(PLOIDY, |ploidy| {
             ploidy.map_or(PLOIDY, |ploidy| ploidy.extract().unwrap())
         })
     });
-    let mut genome_length: usize = py_kwargs.map_or(0_usize, |dict| {
+    let mut genome_length: usize = py_kwargs.as_ref().map_or(0_usize, |dict| {
         dict.get_item("genome_length")
             .map_or(0_usize, |genome_length| {
                 genome_length.map_or(0_usize, |genome_length| genome_length.extract().unwrap())
             })
     });
     let genome_length = &mut genome_length;
-    let bin_width: Option<usize> = py_kwargs.and_then(|dict| {
+    let bin_width: Option<usize> = py_kwargs.as_ref().and_then(|dict| {
         dict.get_item("bin_width").map_or(None, |bin_width| {
             bin_width.and_then(|bin_width| bin_width.extract().unwrap())
         })
     });
-    let num_target_reads: usize = py_kwargs.map_or(READS_PER_BIN, |dict| {
+    let num_target_reads: usize = py_kwargs.as_ref().map_or(READS_PER_BIN, |dict| {
         dict.get_item("target_reads")
             .map_or(READS_PER_BIN, |target_reads| {
                 target_reads.map_or(READS_PER_BIN, |target_reads| {
@@ -909,7 +907,7 @@ fn iterate_bam_file(
                 .collect();
             py_dict_map
         } else {
-            merge_and_reset(copy_numbers, binned_mapping_starts).unwrap()
+            merge_and_reset(&copy_numbers, binned_mapping_starts).unwrap()
         };
         // # Update the number of reads that we have seen, to include the new and old counts
         *valid_number_reads = frequencies
@@ -952,7 +950,7 @@ fn iterate_bam_file(
 }
 
 /// Filters a BAM record based on mapping quality and flags.
-fn filter(record: &bam::lazy::Record, mapping_quality: u8, exclude_supplementary: bool) -> bool {
+fn filter(record: &bam::Record, mapping_quality: u8, exclude_supplementary: bool) -> bool {
     let min_mapping_quality: MappingQuality = match MappingQuality::new(mapping_quality) {
         Some(mapq) => mapq,
         None => unreachable!(),
@@ -975,25 +973,31 @@ fn filter(record: &bam::lazy::Record, mapping_quality: u8, exclude_supplementary
 
 /// Get the ref seq name
 fn reference_sequence_name<'a>(
-    record: &bam::lazy::Record,
+    record: &bam::Record,
     header: &'a sam::Header,
 ) -> io::Result<Option<&'a str>> {
-    record
-        .reference_sequence_id()?
-        .map(|id| {
-            header
-                .reference_sequences()
-                .get_index(id)
-                .map(|(name, _)| name.as_ref())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid reference sequence ID")
-                })
+    let id = match record.reference_sequence_id() {
+        Some(Ok(id)) => id,
+        Some(Err(e)) => return Err(e),
+        None => return Ok(None),
+    };
+
+    header
+        .reference_sequences()
+        .get_index(id)
+        .map(|(name, _)| {
+            name.to_str().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid reference sequence name",
+                )
+            })
         })
         .transpose()
 }
 /// A Python module implemented in Rust.
 #[pymodule]
-fn cnv_from_bam(_py: Python, m: &PyModule) -> PyResult<()> {
+fn cnv_from_bam(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let r = EXIT.clone();
     ctrlc::set_handler(move || {
         r.store(true, Ordering::SeqCst);
@@ -1130,13 +1134,14 @@ mod tests {
     fn test_total_sequences_non_empty_index() {
         use noodles::csi::{
             self as csi,
-            index::{reference_sequence, ReferenceSequence},
+            binning_index::index::{ReferenceSequence, reference_sequence},
         };
+
         // Create a mock BAM index with some metadata for testing
         let index = csi::Index::builder();
         let metadata = reference_sequence::Metadata::new(
-            bgzf::VirtualPosition::from(610),
-            bgzf::VirtualPosition::from(1597),
+            noodles::bgzf::VirtualPosition::from(610),
+            noodles::bgzf::VirtualPosition::from(1597),
             55,
             55,
         );
@@ -1156,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_total_sequences_non_empty_index_no_metadata() {
-        use noodles::csi::{self as csi, index::ReferenceSequence};
+        use noodles::csi::{self as csi, binning_index::index::ReferenceSequence};
         // Create a mock BAM index with some metadata for testing
         let index = csi::Index::builder();
         let reference_sequences = vec![ReferenceSequence::new(
@@ -1175,21 +1180,22 @@ mod tests {
 
     #[test]
     fn test_total_sequences_mixed_metadata() {
+        use noodles::bgzf::VirtualPosition;
         use noodles::csi::{
             self as csi,
-            index::{reference_sequence, ReferenceSequence},
+            binning_index::index::{ReferenceSequence, reference_sequence},
         };
         // Create a mock BAM index with some metadata for testing
         let index = csi::Index::builder();
         let metadata = reference_sequence::Metadata::new(
-            bgzf::VirtualPosition::from(610),
-            bgzf::VirtualPosition::from(1597),
+            VirtualPosition::from(610),
+            VirtualPosition::from(1597),
             55,
             55,
         );
         let metadata2 = reference_sequence::Metadata::new(
-            bgzf::VirtualPosition::from(610),
-            bgzf::VirtualPosition::from(1597),
+            VirtualPosition::from(610),
+            VirtualPosition::from(1597),
             7,
             14,
         );

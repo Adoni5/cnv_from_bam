@@ -1,7 +1,7 @@
 [package]
 name = "cnv_from_bam"
-version = "0.4.4"
-edition = "2021"
+version = "0.4.5"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -9,18 +9,17 @@ name = "cnv_from_bam"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.20.0"
-noodles ={ version = "0.59.0", features = ["bam", "sam", "csi"] }
-
+pyo3 = "0.25.0"
+noodles = { version = "0.99.0", features = ["bam", "sam", "csi", "bgzf"] }
+noodles-bgzf = { version = "0.41.0", features = ["libdeflate"] }
 fnv = "1.0.7"
-indicatif = {version = "*", features = ["rayon"]}
-rayon = {version = "1.8.0" }
-noodles-bgzf = { version = "0.25.0", features = ["libdeflate"] }
+indicatif = { version = "*", features = ["rayon"] }
+rayon = { version = "1.8.0" }
 log = "0.4"
 ctrlc = { version = "3.4.1", features = ["termination"] }
 once_cell = { version = "1.18.0", features = ["parking_lot"] }
 natord = "1.0.9"
-
+bstr = "1.9.0"
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -29,4 +28,4 @@ default = ["extension-module"]
 [profile.release]
 opt-level = 3
 lto = "fat"
-codegen-units  = 1
+codegen-units = 1
